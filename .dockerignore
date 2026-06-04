@@ -39,6 +39,9 @@ mlruns
 mlartifacts
 workspace
 
+# reference/archive
+archive_old_project/
+
 *.log
 .DS_Store
 Thumbs.db
