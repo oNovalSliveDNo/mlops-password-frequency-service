@@ -1,2 +1,12 @@
+# Исключить виртуальное окружение и архивные проекты из проверки mypy
 [tool.mypy]
-exclude = ["venv"]
+exclude = ["venv", "archive_old_project"]
+
+# Настройки для pytest
+[tool.pytest.ini_options]
+# Добавить корень проекта в пути импорта
+pythonpath = ["."]
+# Не искать тесты в архивных папках
+norecursedirs = ["archive_old_project"]
+# Скрыть предупреждения DeprecationWarning от библиотеки opentelemetry
+filterwarnings = ["ignore::DeprecationWarning:opentelemetry.*"]
