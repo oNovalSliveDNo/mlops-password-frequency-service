@@ -1,5 +1,7 @@
+import json
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 import pytest
 import requests
 
@@ -178,6 +180,67 @@ def test_main_allows_validation_failed_result(monkeypatch):
     )
 
     main()
+
+
+def test_main_does_not_train_or_register_on_bad_downloaded_data(tmp_path, monkeypatch):
+    from training.run_pipeline import main
+
+    bad_csv_path = tmp_path / "bad.csv"
+    validation_report_path = tmp_path / "validation_report.json"
+
+    monkeypatch.setenv("DATA_URL", "https://example.com/bad.csv")
+    monkeypatch.setattr("training.run_pipeline._DEFAULT_DATA_PATH", str(bad_csv_path))
+    monkeypatch.setattr(
+        "training.run_pipeline._DEFAULT_VALIDATION_REPORT_PATH",
+        str(validation_report_path),
+    )
+
+    def fake_download_data(data_url, output_path):
+        assert data_url == "https://example.com/bad.csv"
+        Path(output_path).write_text("Password\npassword123\n", encoding="utf-8")
+        return str(output_path)
+
+    def fake_validate_data_file(input_path, report_path):
+        assert input_path == str(bad_csv_path)
+        assert report_path == str(validation_report_path)
+        assert "Times" not in Path(input_path).read_text(encoding="utf-8")
+        report = {
+            "is_valid": False,
+            "errors": ["DataFrame is missing required columns: Times"],
+            "n_rows": 0,
+            "columns": [],
+        }
+        Path(report_path).write_text(
+            json.dumps(report, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return ValidationResult(False, report["errors"], 0, [])
+
+    def fail_if_called(*args, **kwargs):
+        pytest.fail("training or registration side effect must not be called")
+
+    monkeypatch.setattr("training.run_pipeline.download_data", fake_download_data)
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_data_file",
+        fake_validate_data_file,
+    )
+    monkeypatch.setattr("training.run_pipeline.train_password_model", fail_if_called)
+    monkeypatch.setattr(
+        "training.run_pipeline.register_model_in_mlflow",
+        fail_if_called,
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.call_reload_model_endpoint",
+        fail_if_called,
+    )
+
+    main()
+
+    assert validation_report_path.exists()
+    validation_report = json.loads(validation_report_path.read_text(encoding="utf-8"))
+    assert validation_report["is_valid"] is False
+    assert validation_report["errors"]
+    assert validation_report["n_rows"] == 0
 
 
 def test_run_training_pipeline_does_not_reload_when_registration_fails(monkeypatch):
