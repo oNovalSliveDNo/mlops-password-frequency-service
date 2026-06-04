@@ -19,6 +19,38 @@ _PRODUCTION_MODEL_ALIAS = "prod"
 
 logger = logging.getLogger(__name__)
 
+_SENSITIVE_LOG_KEY_PARTS = ("secret", "credential", "password", "token", "key")
+_REDACTED_LOG_VALUE = "[REDACTED]"
+
+
+def _is_sensitive_log_key(key: str) -> bool:
+    normalized_key = key.lower()
+    return any(part in normalized_key for part in _SENSITIVE_LOG_KEY_PARTS)
+
+
+def _sanitize_for_log(value: Any) -> Any:
+    """Return a log-safe copy of a value by redacting known sensitive data."""
+    service_reload_secret = os.getenv("SERVICE_RELOAD_SECRET")
+
+    if isinstance(value, dict):
+        return {
+            key: _REDACTED_LOG_VALUE
+            if _is_sensitive_log_key(str(key))
+            else _sanitize_for_log(item)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, list):
+        return [_sanitize_for_log(item) for item in value]
+
+    if isinstance(value, tuple):
+        return tuple(_sanitize_for_log(item) for item in value)
+
+    if isinstance(value, str) and service_reload_secret:
+        return value.replace(service_reload_secret, _REDACTED_LOG_VALUE)
+
+    return value
+
 
 def download_data(data_url: str, output_path: str) -> str:
     from training.download_data import download_data as download_data_impl
@@ -173,18 +205,21 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
     Path("validation_reports").mkdir(parents=True, exist_ok=True)
 
     data_path = download_data(resolved_data_url, _DEFAULT_DATA_PATH)
+    logger.info("data downloaded: %s", _sanitize_for_log(data_path))
     validation_result = validate_data_file(data_path, _DEFAULT_VALIDATION_REPORT_PATH)
     validation_report = _validation_report_dict(validation_result)
     if not validation_result.is_valid:
         errors = validation_result.errors
         error_message = "; ".join(errors) or "unknown validation error"
-        logger.error("Data validation failed: %s", error_message)
+        logger.info("validation failed: %s", _sanitize_for_log(error_message))
         return {
             "status": "validation_failed",
             "data_path": data_path,
             "validation_report": validation_report,
             "errors": errors,
         }
+
+    logger.info("validation passed")
 
     if hasattr(validation_result, "cleaned_df"):
         training_df = validation_result.cleaned_df
@@ -200,6 +235,7 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
 
     evidently_report = run_evidently_tests(training_df, _DEFAULT_EVIDENTLY_REPORT_PATH)
     model, metrics = train_password_model(training_df)
+    logger.info("model trained")
     model_artifact_path = save_model_artifact(model, _DEFAULT_MODEL_ARTIFACT_PATH)
 
     registration_result = register_model_in_mlflow(
@@ -208,8 +244,10 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
         validation_report=validation_report,
         model_alias=_PRODUCTION_MODEL_ALIAS,
     )
+    logger.info("model registered: %s", _sanitize_for_log(registration_result))
 
     reload_result = call_reload_model_endpoint()
+    logger.info("service reloaded: %s", _sanitize_for_log(reload_result))
 
     return {
         "data_path": data_path,

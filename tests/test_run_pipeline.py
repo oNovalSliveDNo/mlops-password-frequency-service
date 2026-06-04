@@ -150,7 +150,7 @@ def test_run_training_pipeline_stops_on_invalid_data(monkeypatch, caplog):
         lambda: calls.append("reload"),
     )
 
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.INFO):
         result = run_training_pipeline()
 
     assert result == {
@@ -164,7 +164,8 @@ def test_run_training_pipeline_stops_on_invalid_data(monkeypatch, caplog):
         },
         "errors": ["bad data"],
     }
-    assert "Data validation failed: bad data" in caplog.text
+    assert "data downloaded: downloaded.csv" in caplog.text
+    assert "validation failed: bad data" in caplog.text
     assert calls == []
 
 
@@ -232,7 +233,7 @@ def test_run_training_pipeline_does_not_reload_when_registration_fails(monkeypat
     assert calls == ["register"]
 
 
-def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch):
+def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, caplog):
     from training.run_pipeline import run_training_pipeline
 
     calls = []
@@ -273,10 +274,16 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch):
     monkeypatch.setattr("training.run_pipeline.register_model_in_mlflow", register)
     monkeypatch.setattr(
         "training.run_pipeline.call_reload_model_endpoint",
-        lambda: calls.append("reload") or {"status": "model_reloaded"},
+        lambda: (
+            calls.append("reload")
+            or {"status": "model_reloaded", "token": "super-secret"}
+        ),
     )
 
-    result = run_training_pipeline()
+    monkeypatch.setenv("SERVICE_RELOAD_SECRET", "super-secret")
+
+    with caplog.at_level(logging.INFO):
+        result = run_training_pipeline()
 
     assert calls == [
         (
@@ -291,7 +298,19 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch):
         ),
         "reload",
     ]
-    assert result["reload"] == {"status": "model_reloaded"}
+    assert result["reload"] == {"status": "model_reloaded", "token": "super-secret"}
+    assert "data downloaded: downloaded.csv" in caplog.text
+    assert "validation passed" in caplog.text
+    assert "model trained" in caplog.text
+    assert (
+        "model registered: {'model_name': 'passwords', 'model_alias': 'prod', 'model_version': '1'}"
+        in caplog.text
+    )
+    assert (
+        "service reloaded: {'status': 'model_reloaded', 'token': '[REDACTED]'}"
+        in caplog.text
+    )
+    assert "super-secret" not in caplog.text
 
 
 def test_run_training_pipeline_requires_reload_url_in_ci_after_registration(
