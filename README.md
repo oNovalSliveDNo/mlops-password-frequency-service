@@ -47,28 +47,32 @@
 
 ## Архитектура
 
+### Обычное предсказание
+
 ```mermaid
-flowchart TD
-    A[Внешний клиент / проверочный скрипт] -->|POST /predict| B[FastAPI-сервис на Render]
-    B -->|Предсказания Times| A
+flowchart LR
+    A[Клиент] -->|POST /predict| B[FastAPI]
+    B --> C[prod-модель в памяти]
+    C --> D[Times]
+    D --> A
+```
 
-    A -->|POST /trigger с data_url| B
-    B -->|Запуск pipeline через GitLab API| C[GitLab CI/CD]
+### Переобучение
 
-    C --> D[Скачивание новых данных]
-    D --> E[Проверка качества данных]
+```mermaid
+flowchart LR
+    A[Клиент] -->|POST /trigger| B[GitLab CI/CD]
+    B --> C[Скачивание данных]
+    C --> D[Проверка данных]
 
-    E -->|Данные плохие| F[Остановка без обучения]
-    F --> B
+    D -->|bad-данные| E[Остановка без обучения]
+    E --> F[Старая модель остаётся рабочей]
 
-    E -->|Данные хорошие| G[Обучение новой модели]
-    G --> H[Логирование модели в MLflow]
-    H --> I[Регистрация модели в Model Registry]
-    I --> J[Переключение alias prod]
-    J -->|POST /reload_model| B
-
-    B --> K[Загрузка новой prod-модели из MLflow]
-    K --> L[Обновление модели в памяти сервиса]
+    D -->|good-данные| G[Обучение]
+    G --> H[MLflow]
+    H --> I[Model Registry]
+    I --> J[alias prod]
+    J -->|POST /reload_model| K[Обновление модели в памяти]
 ```
 
 ---
