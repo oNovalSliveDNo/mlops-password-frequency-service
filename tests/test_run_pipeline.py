@@ -111,7 +111,7 @@ def test_call_reload_model_endpoint_retries_and_sanitizes_secret(monkeypatch):
     assert "super-secret" not in error_message
 
 
-def test_run_training_pipeline_stops_on_invalid_data(monkeypatch):
+def test_run_training_pipeline_stops_on_invalid_data(monkeypatch, caplog):
     from training.run_pipeline import run_training_pipeline
 
     calls = []
@@ -121,10 +121,13 @@ def test_run_training_pipeline_stops_on_invalid_data(monkeypatch):
         "training.run_pipeline.download_data",
         lambda data_url, output_path: "downloaded.csv",
     )
-    monkeypatch.setattr("training.run_pipeline.read_csv", lambda path: object())
+    monkeypatch.setattr(
+        "training.run_pipeline._read_validated_training_dataframe",
+        lambda data_path: calls.append("read_validated"),
+    )
     monkeypatch.setattr(
         "training.run_pipeline.run_evidently_tests",
-        lambda df, output_path: {"status": "success"},
+        lambda df, output_path: calls.append("evidently"),
     )
     monkeypatch.setattr(
         "training.run_pipeline.validate_data_file",
@@ -135,6 +138,10 @@ def test_run_training_pipeline_stops_on_invalid_data(monkeypatch):
         lambda df: calls.append("train"),
     )
     monkeypatch.setattr(
+        "training.run_pipeline.save_model_artifact",
+        lambda model, output_path: calls.append("save"),
+    )
+    monkeypatch.setattr(
         "training.run_pipeline.register_model_in_mlflow",
         lambda model, metrics, validation_report=None: calls.append("register"),
     )
@@ -143,10 +150,33 @@ def test_run_training_pipeline_stops_on_invalid_data(monkeypatch):
         lambda: calls.append("reload"),
     )
 
-    with pytest.raises(RuntimeError, match="Data validation failed: bad data"):
-        run_training_pipeline()
+    with caplog.at_level(logging.ERROR):
+        result = run_training_pipeline()
 
+    assert result == {
+        "status": "validation_failed",
+        "data_path": "downloaded.csv",
+        "validation_report": {
+            "is_valid": False,
+            "errors": ["bad data"],
+            "n_rows": 0,
+            "columns": [],
+        },
+        "errors": ["bad data"],
+    }
+    assert "Data validation failed: bad data" in caplog.text
     assert calls == []
+
+
+def test_main_allows_validation_failed_result(monkeypatch):
+    from training.run_pipeline import main
+
+    monkeypatch.setattr(
+        "training.run_pipeline.run_training_pipeline",
+        lambda: {"status": "validation_failed", "errors": ["bad data"]},
+    )
+
+    main()
 
 
 def test_run_training_pipeline_does_not_reload_when_registration_fails(monkeypatch):

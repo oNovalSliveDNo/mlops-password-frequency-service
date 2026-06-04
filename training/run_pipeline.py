@@ -164,8 +164,15 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
     validation_result = validate_data_file(data_path, _DEFAULT_VALIDATION_REPORT_PATH)
     validation_report = _validation_report_dict(validation_result)
     if not validation_result.is_valid:
-        errors = "; ".join(validation_result.errors)
-        raise RuntimeError(f"Data validation failed: {errors}")
+        errors = validation_result.errors
+        error_message = "; ".join(errors) or "unknown validation error"
+        logger.error("Data validation failed: %s", error_message)
+        return {
+            "status": "validation_failed",
+            "data_path": data_path,
+            "validation_report": validation_report,
+            "errors": errors,
+        }
 
     training_df = _read_validated_training_dataframe(data_path)
     evidently_report = run_evidently_tests(training_df, _DEFAULT_EVIDENTLY_REPORT_PATH)
