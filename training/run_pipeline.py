@@ -133,7 +133,19 @@ def call_reload_model_endpoint() -> dict[str, Any]:
         logger.warning(message)
         return {"status": "skipped", "reason": "SERVICE_RELOAD_URL is not configured"}
 
-    headers = {"X-Service-Token": reload_secret or ""}
+    if not reload_secret:
+        if os.getenv("CI"):
+            raise RuntimeError(
+                "SERVICE_RELOAD_SECRET is required in CI to call /reload_model "
+                "after successful training."
+            )
+
+        raise RuntimeError(
+            "SERVICE_RELOAD_SECRET is required to call /reload_model when "
+            "SERVICE_RELOAD_URL is configured."
+        )
+
+    headers = {"X-Service-Token": reload_secret}
     last_error: str | None = None
 
     for attempt in range(1, _RELOAD_ATTEMPTS + 1):
@@ -154,8 +166,11 @@ def call_reload_model_endpoint() -> dict[str, Any]:
                 }
         except requests.RequestException as exc:
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            sanitized_error = _sanitize_for_log(str(exc))
             if status_code is None:
                 last_error = type(exc).__name__
+                if sanitized_error:
+                    last_error = f"{last_error}: {sanitized_error}"
             else:
                 last_error = f"{type(exc).__name__} with HTTP status {status_code}"
 
@@ -164,7 +179,7 @@ def call_reload_model_endpoint() -> dict[str, Any]:
 
     raise RuntimeError(
         "Failed to reload service model after "
-        f"{_RELOAD_ATTEMPTS} attempts. Last error: {last_error}."
+        f"{_RELOAD_ATTEMPTS} attempts. Last error: {_sanitize_for_log(last_error)}."
     )
 
 

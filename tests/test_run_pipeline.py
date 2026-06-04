@@ -54,6 +54,23 @@ def test_call_reload_model_endpoint_requires_url_in_ci(monkeypatch):
         call_reload_model_endpoint()
 
 
+def test_call_reload_model_endpoint_requires_secret_when_url_is_configured(monkeypatch):
+    monkeypatch.setenv("SERVICE_RELOAD_URL", "https://service.example/reload_model")
+    monkeypatch.delenv("SERVICE_RELOAD_SECRET", raising=False)
+    monkeypatch.setenv("CI", "true")
+
+    def fail_post(*args, **kwargs):
+        pytest.fail("reload endpoint must not be called without SERVICE_RELOAD_SECRET")
+
+    monkeypatch.setattr("training.run_pipeline.requests.post", fail_post)
+
+    with pytest.raises(
+        RuntimeError,
+        match="SERVICE_RELOAD_SECRET is required in CI to call /reload_model",
+    ):
+        call_reload_model_endpoint()
+
+
 def test_call_reload_model_endpoint_posts_with_secret(monkeypatch):
     monkeypatch.setenv("SERVICE_RELOAD_URL", "https://service.example/reload_model")
     monkeypatch.setenv("SERVICE_RELOAD_SECRET", "super-secret")
