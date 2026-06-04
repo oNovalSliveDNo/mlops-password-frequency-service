@@ -76,7 +76,7 @@ build:
     name: gcr.io/kaniko-project/executor:v1.14.0-debug
     entrypoint: [""]
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "push"'
   needs:
     - lint
     - format
@@ -104,7 +104,7 @@ deploy:
   stage: deploy
   image: curlimages/curl:latest
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "push"'
   needs:
     - build
   script:
