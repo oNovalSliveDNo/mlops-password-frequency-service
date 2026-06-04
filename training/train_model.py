@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
 from sklearn.linear_model import Ridge
-from sklearn.metrics import mean_squared_error
+from sklearn.metrics import root_mean_squared_error
 from sklearn.pipeline import FeatureUnion, Pipeline
 
 from training.entropy import TextEntropyTransformer
@@ -47,7 +47,7 @@ def train_password_model(df: pd.DataFrame) -> tuple[Pipeline, dict]:
 
     pipeline.fit(passwords, target)
     predictions = pipeline.predict(passwords)
-    rmse_train = mean_squared_error(target, predictions, squared=False)
+    rmse_train = root_mean_squared_error(target, predictions)
 
     return pipeline, {
         "rmse_train": float(rmse_train),
