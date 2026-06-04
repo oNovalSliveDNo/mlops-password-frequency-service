@@ -199,6 +199,44 @@ def test_main_allows_validation_failed_result(monkeypatch):
     main()
 
 
+def test_main_logs_sanitized_pipeline_result(monkeypatch, caplog):
+    from training.run_pipeline import main
+
+    secret = "super-secret"
+    result = {
+        "status": "success",
+        "reload": {
+            "status": "model_reloaded",
+            "message": f"accepted with {secret}",
+        },
+    }
+
+    monkeypatch.setenv("SERVICE_RELOAD_SECRET", secret)
+    monkeypatch.setattr("training.run_pipeline.run_training_pipeline", lambda: result)
+
+    with caplog.at_level(logging.INFO):
+        main()
+
+    completed_records = [
+        record
+        for record in caplog.records
+        if record.msg == "Training pipeline completed: %s"
+    ]
+
+    assert result["reload"]["message"] == f"accepted with {secret}"
+    assert len(completed_records) == 1
+    assert completed_records[0].args == {
+        "status": "success",
+        "reload": {
+            "status": "model_reloaded",
+            "message": "accepted with [REDACTED]",
+        },
+    }
+    assert "Training pipeline completed:" in caplog.text
+    assert secret not in caplog.text
+    assert "[REDACTED]" in caplog.text
+
+
 def test_main_does_not_train_or_register_on_bad_downloaded_data(tmp_path, monkeypatch):
     from training.run_pipeline import main
 

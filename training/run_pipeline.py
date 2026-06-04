@@ -277,7 +277,7 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
 def main() -> None:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
     result = run_training_pipeline()
-    logger.info("Training pipeline completed: %s", result)
+    logger.info("Training pipeline completed: %s", _sanitize_for_log(result))
 
 
 if __name__ == "__main__":
