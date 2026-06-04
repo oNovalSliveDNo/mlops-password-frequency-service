@@ -114,7 +114,9 @@ def register_model_in_mlflow(
                 )
                 mlflow.log_artifact(str(validation_report_path))
 
-        tests_report_path = _PROJECT_ROOT / "tests.json"
+        tests_report_path = _PROJECT_ROOT / "reports" / "tests.json"
+        if not tests_report_path.exists():
+            tests_report_path = _PROJECT_ROOT / "tests.json"
         if tests_report_path.exists():
             mlflow.log_artifact(str(tests_report_path))
 
