@@ -2,6 +2,7 @@ import logging
 import os
 import time
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -10,10 +11,10 @@ import requests
 _RELOAD_ATTEMPTS = 3
 _RELOAD_RETRY_DELAY_SECONDS = 2
 _RELOAD_TIMEOUT_SECONDS = 10
-_DEFAULT_DATA_PATH = "artifacts/training_data.csv"
+_DEFAULT_DATA_PATH = "artifacts/new_data.csv"
 _DEFAULT_MODEL_ARTIFACT_PATH = "artifacts/model.joblib"
-_DEFAULT_VALIDATION_REPORT_PATH = "validation_report.json"
-_DEFAULT_EVIDENTLY_REPORT_PATH = "tests.json"
+_DEFAULT_VALIDATION_REPORT_PATH = "validation_reports/validation_report.json"
+_DEFAULT_EVIDENTLY_REPORT_PATH = "reports/tests.json"
 _PRODUCTION_MODEL_ALIAS = "prod"
 
 
@@ -154,6 +155,10 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
     resolved_data_url = data_url or os.getenv("DATA_URL")
     if not resolved_data_url:
         raise ValueError("DATA_URL environment variable is required.")
+
+    Path("artifacts").mkdir(parents=True, exist_ok=True)
+    Path("reports").mkdir(parents=True, exist_ok=True)
+    Path("validation_reports").mkdir(parents=True, exist_ok=True)
 
     data_path = download_data(resolved_data_url, _DEFAULT_DATA_PATH)
     validation_result = validate_data_file(data_path, _DEFAULT_VALIDATION_REPORT_PATH)
