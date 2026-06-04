@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+from dataclasses import asdict
 from typing import Any
 
 import requests
@@ -9,8 +10,68 @@ import requests
 _RELOAD_ATTEMPTS = 3
 _RELOAD_RETRY_DELAY_SECONDS = 2
 _RELOAD_TIMEOUT_SECONDS = 10
+_DEFAULT_DATA_PATH = "artifacts/training_data.csv"
+_DEFAULT_MODEL_ARTIFACT_PATH = "artifacts/model.joblib"
+_DEFAULT_VALIDATION_REPORT_PATH = "validation_report.json"
+_DEFAULT_EVIDENTLY_REPORT_PATH = "tests.json"
+_PRODUCTION_MODEL_ALIAS = "prod"
+
 
 logger = logging.getLogger(__name__)
+
+
+def download_data(data_url: str, output_path: str) -> str:
+    from training.download_data import download_data as download_data_impl
+
+    return download_data_impl(data_url, output_path)
+
+
+def read_csv(path: str):
+    import pandas as pd
+
+    return pd.read_csv(path)
+
+
+def run_evidently_tests(df, output_path: str = _DEFAULT_EVIDENTLY_REPORT_PATH) -> dict:
+    from training.validate_data import run_evidently_tests as run_evidently_tests_impl
+
+    return run_evidently_tests_impl(df, output_path)
+
+
+def validate_data_file(
+    input_path: str, report_path: str = _DEFAULT_VALIDATION_REPORT_PATH
+):
+    from training.validate_data import validate_data_file as validate_data_file_impl
+
+    return validate_data_file_impl(input_path, report_path)
+
+
+def validate_password_dataframe(df):
+    from training.validate_data import (
+        validate_password_dataframe as validate_password_dataframe_impl,
+    )
+
+    return validate_password_dataframe_impl(df)
+
+
+def train_password_model(df):
+    from training.train_model import train_password_model as train_password_model_impl
+
+    return train_password_model_impl(df)
+
+
+def save_model_artifact(model, output_path: str = _DEFAULT_MODEL_ARTIFACT_PATH) -> str:
+    from training.train_model import save_model_artifact as save_model_artifact_impl
+
+    return save_model_artifact_impl(model, output_path)
+
+
+def register_model_in_mlflow(
+    model, metrics: dict, validation_report: dict | None = None
+) -> dict:
+    from training.register_model import register_model_in_mlflow as register_model_impl
+
+    return register_model_impl(model, metrics, validation_report=validation_report)
 
 
 def call_reload_model_endpoint() -> dict[str, Any]:
@@ -65,3 +126,72 @@ def call_reload_model_endpoint() -> dict[str, Any]:
         "Failed to reload service model after "
         f"{_RELOAD_ATTEMPTS} attempts. Last error: {last_error}."
     )
+
+
+def _read_validated_training_dataframe(data_path: str):
+    """Read and clean training data after the file-level validation passed."""
+    raw_df = read_csv(data_path)
+    is_valid, errors, cleaned_df = validate_password_dataframe(raw_df)
+    if not is_valid or cleaned_df is None:
+        raise RuntimeError(
+            "Data validation failed after validation gate passed: " + "; ".join(errors)
+        )
+
+    return cleaned_df
+
+
+def _validation_report_dict(validation_result) -> dict[str, Any]:
+    return asdict(validation_result)
+
+
+def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
+    """Run the training orchestration from download through service reload.
+
+    Reload is intentionally called only after these gates complete successfully:
+    data download, data validation, model training, and MLflow registration with
+    the production alias set by ``register_model_in_mlflow``.
+    """
+    resolved_data_url = data_url or os.getenv("DATA_URL")
+    if not resolved_data_url:
+        raise ValueError("DATA_URL environment variable is required.")
+
+    data_path = download_data(resolved_data_url, _DEFAULT_DATA_PATH)
+    validation_result = validate_data_file(data_path, _DEFAULT_VALIDATION_REPORT_PATH)
+    validation_report = _validation_report_dict(validation_result)
+    if not validation_result.is_valid:
+        errors = "; ".join(validation_result.errors)
+        raise RuntimeError(f"Data validation failed: {errors}")
+
+    training_df = _read_validated_training_dataframe(data_path)
+    evidently_report = run_evidently_tests(training_df, _DEFAULT_EVIDENTLY_REPORT_PATH)
+    model, metrics = train_password_model(training_df)
+    model_artifact_path = save_model_artifact(model, _DEFAULT_MODEL_ARTIFACT_PATH)
+
+    registration_result = register_model_in_mlflow(
+        model,
+        metrics,
+        validation_report=validation_report,
+    )
+
+    reload_result = {"status": "skipped", "reason": "MODEL_ALIAS is not prod"}
+    if registration_result.get("model_alias") == _PRODUCTION_MODEL_ALIAS:
+        reload_result = call_reload_model_endpoint()
+
+    return {
+        "data_path": data_path,
+        "evidently_report": evidently_report,
+        "validation_report": validation_report,
+        "model_artifact_path": model_artifact_path,
+        "registration": registration_result,
+        "reload": reload_result,
+    }
+
+
+def main() -> None:
+    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+    result = run_training_pipeline()
+    logger.info("Training pipeline completed: %s", result)
+
+
+if __name__ == "__main__":
+    main()

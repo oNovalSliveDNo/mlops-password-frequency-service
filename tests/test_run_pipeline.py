@@ -1,9 +1,17 @@
 import logging
-
+from dataclasses import dataclass
 import pytest
 import requests
 
 from training.run_pipeline import call_reload_model_endpoint
+
+
+@dataclass(frozen=True)
+class ValidationResult:
+    is_valid: bool
+    errors: list[str]
+    n_rows: int
+    columns: list[str]
 
 
 class FakeResponse:
@@ -101,3 +109,203 @@ def test_call_reload_model_endpoint_retries_and_sanitizes_secret(monkeypatch):
     assert sleeps == [2, 2]
     assert "ConnectionError" in error_message
     assert "super-secret" not in error_message
+
+
+def test_run_training_pipeline_stops_on_invalid_data(monkeypatch):
+    from training.run_pipeline import run_training_pipeline
+
+    calls = []
+
+    monkeypatch.setenv("DATA_URL", "https://example.com/data.csv")
+    monkeypatch.setattr(
+        "training.run_pipeline.download_data",
+        lambda data_url, output_path: "downloaded.csv",
+    )
+    monkeypatch.setattr("training.run_pipeline.read_csv", lambda path: object())
+    monkeypatch.setattr(
+        "training.run_pipeline.run_evidently_tests",
+        lambda df, output_path: {"status": "success"},
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_data_file",
+        lambda input_path, report_path: ValidationResult(False, ["bad data"], 0, []),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.train_password_model",
+        lambda df: calls.append("train"),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.register_model_in_mlflow",
+        lambda model, metrics, validation_report=None: calls.append("register"),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.call_reload_model_endpoint",
+        lambda: calls.append("reload"),
+    )
+
+    with pytest.raises(RuntimeError, match="Data validation failed: bad data"):
+        run_training_pipeline()
+
+    assert calls == []
+
+
+def test_run_training_pipeline_does_not_reload_when_registration_fails(monkeypatch):
+    from training.run_pipeline import run_training_pipeline
+
+    calls = []
+
+    monkeypatch.setenv("DATA_URL", "https://example.com/data.csv")
+    monkeypatch.setattr(
+        "training.run_pipeline.download_data",
+        lambda data_url, output_path: "downloaded.csv",
+    )
+    monkeypatch.setattr("training.run_pipeline.read_csv", lambda path: object())
+    monkeypatch.setattr(
+        "training.run_pipeline.run_evidently_tests",
+        lambda df, output_path: {"status": "success"},
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_data_file",
+        lambda input_path, report_path: ValidationResult(
+            True, [], 1, ["Password", "Times"]
+        ),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_password_dataframe",
+        lambda df: (True, [], object()),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.train_password_model",
+        lambda df: ("model", {"n_rows": 1}),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.save_model_artifact",
+        lambda model, output_path: "artifacts/model.joblib",
+    )
+
+    def fail_registration(model, metrics, validation_report=None):
+        calls.append("register")
+        raise RuntimeError("mlflow is down")
+
+    monkeypatch.setattr(
+        "training.run_pipeline.register_model_in_mlflow",
+        fail_registration,
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.call_reload_model_endpoint",
+        lambda: calls.append("reload"),
+    )
+
+    with pytest.raises(RuntimeError, match="mlflow is down"):
+        run_training_pipeline()
+
+    assert calls == ["register"]
+
+
+def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch):
+    from training.run_pipeline import run_training_pipeline
+
+    calls = []
+
+    monkeypatch.setenv("DATA_URL", "https://example.com/data.csv")
+    monkeypatch.setattr(
+        "training.run_pipeline.download_data",
+        lambda data_url, output_path: "downloaded.csv",
+    )
+    monkeypatch.setattr("training.run_pipeline.read_csv", lambda path: object())
+    monkeypatch.setattr(
+        "training.run_pipeline.run_evidently_tests",
+        lambda df, output_path: {"status": "success"},
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_data_file",
+        lambda input_path, report_path: ValidationResult(
+            True, [], 1, ["Password", "Times"]
+        ),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_password_dataframe",
+        lambda df: (True, [], object()),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.train_password_model",
+        lambda df: ("model", {"n_rows": 1}),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.save_model_artifact",
+        lambda model, output_path: "artifacts/model.joblib",
+    )
+
+    def register(model, metrics, validation_report=None):
+        calls.append(("register", validation_report))
+        return {"model_name": "passwords", "model_alias": "prod", "model_version": "1"}
+
+    monkeypatch.setattr("training.run_pipeline.register_model_in_mlflow", register)
+    monkeypatch.setattr(
+        "training.run_pipeline.call_reload_model_endpoint",
+        lambda: calls.append("reload") or {"status": "model_reloaded"},
+    )
+
+    result = run_training_pipeline()
+
+    assert calls == [
+        (
+            "register",
+            {
+                "is_valid": True,
+                "errors": [],
+                "n_rows": 1,
+                "columns": ["Password", "Times"],
+            },
+        ),
+        "reload",
+    ]
+    assert result["reload"] == {"status": "model_reloaded"}
+
+
+def test_run_training_pipeline_requires_reload_url_in_ci_after_registration(
+    monkeypatch,
+):
+    from training.run_pipeline import run_training_pipeline
+
+    monkeypatch.setenv("DATA_URL", "https://example.com/data.csv")
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.delenv("SERVICE_RELOAD_URL", raising=False)
+    monkeypatch.setattr(
+        "training.run_pipeline.download_data",
+        lambda data_url, output_path: "downloaded.csv",
+    )
+    monkeypatch.setattr("training.run_pipeline.read_csv", lambda path: object())
+    monkeypatch.setattr(
+        "training.run_pipeline.run_evidently_tests",
+        lambda df, output_path: {"status": "success"},
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_data_file",
+        lambda input_path, report_path: ValidationResult(
+            True, [], 1, ["Password", "Times"]
+        ),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_password_dataframe",
+        lambda df: (True, [], object()),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.train_password_model",
+        lambda df: ("model", {"n_rows": 1}),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.save_model_artifact",
+        lambda model, output_path: "artifacts/model.joblib",
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.register_model_in_mlflow",
+        lambda model, metrics, validation_report=None: {
+            "model_name": "passwords",
+            "model_alias": "prod",
+            "model_version": "1",
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="SERVICE_RELOAD_URL is required in CI"):
+        run_training_pipeline()
