@@ -1,7 +1,6 @@
 import logging
 import os
 import time
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -142,7 +141,12 @@ def _read_validated_training_dataframe(data_path: str):
 
 
 def _validation_report_dict(validation_result) -> dict[str, Any]:
-    return asdict(validation_result)
+    return {
+        "is_valid": validation_result.is_valid,
+        "errors": validation_result.errors,
+        "n_rows": validation_result.n_rows,
+        "columns": validation_result.columns,
+    }
 
 
 def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
@@ -174,7 +178,18 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
             "errors": errors,
         }
 
-    training_df = _read_validated_training_dataframe(data_path)
+    if hasattr(validation_result, "cleaned_df"):
+        training_df = validation_result.cleaned_df
+        if training_df is None:
+            raise RuntimeError(
+                "Data validation succeeded but cleaned data is missing; "
+                "this indicates an internal validation error."
+            )
+    else:
+        # Backward-compatible path for tests or external callers that provide
+        # ValidationResult-like objects without the new cleaned_df field.
+        training_df = _read_validated_training_dataframe(data_path)
+
     evidently_report = run_evidently_tests(training_df, _DEFAULT_EVIDENTLY_REPORT_PATH)
     model, metrics = train_password_model(training_df)
     model_artifact_path = save_model_artifact(model, _DEFAULT_MODEL_ARTIFACT_PATH)

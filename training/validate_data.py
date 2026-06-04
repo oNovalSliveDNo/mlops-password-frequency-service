@@ -23,6 +23,7 @@ class ValidationResult:
     errors: list[str]
     n_rows: int
     columns: list[str]
+    cleaned_df: pd.DataFrame | None = None
 
 
 def run_evidently_tests(df: pd.DataFrame, output_path: str = "tests.json") -> dict:
@@ -162,7 +163,7 @@ def validate_data_file(
             if cleaned_df is None:
                 raise RuntimeError("Validation succeeded without cleaned data")
             result = ValidationResult(
-                True, [], len(cleaned_df.index), list(cleaned_df.columns)
+                True, [], len(cleaned_df.index), list(cleaned_df.columns), cleaned_df
             )
         else:
             result = ValidationResult(False, errors, 0, [])
