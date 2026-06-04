@@ -1,16 +1,17 @@
-# Исключить виртуальное окружение и архивные проекты из проверки mypy
 [tool.mypy]
 exclude = ["venv", "archive_old_project"]
+python_version = "3.11"
+disable_error_code = ["import-untyped"]
 
 [[tool.mypy.overrides]]
-module = "sklearn.*"
+module = ["sklearn.*", "evidently.*"]
 ignore_missing_imports = true
 
-# Настройки для pytest
 [tool.pytest.ini_options]
-# Добавить корень проекта в пути импорта
 pythonpath = ["."]
-# Не искать тесты в архивных папках
 norecursedirs = ["archive_old_project"]
-# Скрыть предупреждения DeprecationWarning от библиотеки opentelemetry
-filterwarnings = ["ignore::DeprecationWarning:opentelemetry.*"]
+filterwarnings = [
+    "ignore::DeprecationWarning:opentelemetry.*",
+    "ignore::DeprecationWarning:scipy.*",
+    "ignore:Please import `LinAlgError` from the `scipy.linalg` namespace:DeprecationWarning",
+]

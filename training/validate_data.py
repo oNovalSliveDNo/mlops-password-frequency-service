@@ -7,6 +7,14 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from evidently.test_suite import TestSuite
+from evidently.tests import (
+    TestNumberOfDuplicatedColumns,
+    TestNumberOfEmptyColumns,
+    TestNumberOfEmptyRows,
+    TestNumberOfRows,
+    TestShareOfMissingValues,
+)
 
 
 @dataclass(frozen=True)
@@ -15,6 +23,41 @@ class ValidationResult:
     errors: list[str]
     n_rows: int
     columns: list[str]
+
+
+def run_evidently_tests(df: pd.DataFrame, output_path: str = "tests.json") -> dict:
+    """Run non-blocking Evidently data quality checks and save their report."""
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        tests = TestSuite(
+            tests=[
+                TestNumberOfRows(gt=0),
+                TestShareOfMissingValues(eq=0),
+                TestNumberOfEmptyRows(eq=0),
+                TestNumberOfEmptyColumns(eq=0),
+                TestNumberOfDuplicatedColumns(eq=0),
+            ]
+        )
+        tests.run(reference_data=None, current_data=df)
+        report = tests.as_dict()
+        if "status" not in report:
+            summary = report.get("summary", {})
+            report["status"] = (
+                "success" if summary.get("all_passed") is True else "failure"
+            )
+    except Exception as exc:
+        report = {
+            "status": "warning",
+            "warning": f"Evidently tests failed to run: {exc}",
+            "evidently_failed": True,
+        }
+
+    output_file.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return report
 
 
 def validate_password_dataframe(
