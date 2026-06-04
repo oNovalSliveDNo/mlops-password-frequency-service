@@ -174,7 +174,10 @@ def validate_data_file(
         "n_rows": result.n_rows,
         "columns": result.columns,
     }
-    Path(report_path).write_text(
-        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    report_file = Path(report_path)
+    report_file.parent.mkdir(parents=True, exist_ok=True)
+    report_file.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
     return result

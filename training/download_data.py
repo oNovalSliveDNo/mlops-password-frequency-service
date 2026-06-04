@@ -11,7 +11,7 @@ def download_data(data_url: str, output_path: str) -> str:
         response = requests.get(data_url, timeout=30)
         response.raise_for_status()
     except requests.RequestException as exc:
-        raise RuntimeError(f"Failed to download data from {data_url}") from exc
+        raise RuntimeError("Failed to download data from provided DATA_URL") from exc
 
     if not response.content:
         raise ValueError("Downloaded file is empty")

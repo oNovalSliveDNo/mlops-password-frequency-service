@@ -1,10 +1,9 @@
-[tool.mypy]
-exclude = ["venv", "archive_old_project"]
-python_version = "3.11"
-disable_error_code = ["import-untyped"]
+[tool.ruff]
+extend-exclude = [".venv*", "venv*"]
 
-[[tool.mypy.overrides]]
-module = ["sklearn.*", "evidently.*"]
+[tool.mypy]
+python_version = "3.11"
+exclude = ["venv", "archive_old_project", ".venv*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -14,4 +13,6 @@ filterwarnings = [
     "ignore::DeprecationWarning:opentelemetry.*",
     "ignore::DeprecationWarning:scipy.*",
     "ignore:Please import `LinAlgError` from the `scipy.linalg` namespace:DeprecationWarning",
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated.*",
+    "ignore::pydantic.warnings.PydanticDeprecatedSince20:mlflow.*",
 ]
