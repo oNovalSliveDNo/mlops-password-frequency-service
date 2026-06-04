@@ -4,9 +4,7 @@ workflow:
       when: always
     - if: '$CI_PIPELINE_SOURCE == "trigger"'
       when: always
-    - if: '$CI_PIPELINE_SOURCE == "web"'
-      when: always
-    - if: '$CI_PIPELINE_SOURCE == "api"'
+    - if: '$CI_PIPELINE_SOURCE == "api" && $DATA_URL'
       when: always
     - when: never
 
