@@ -65,3 +65,72 @@ def test_validate_password_dataframe_rejects_non_numeric_times():
     assert is_valid is False
     assert cleaned_df is None
     assert any("non-numeric" in error for error in errors)
+
+
+def test_validate_data_file_writes_valid_report(tmp_path):
+    from training.validate_data import ValidationResult, validate_data_file
+
+    input_path = tmp_path / "passwords.csv"
+    report_path = tmp_path / "report.json"
+    input_path.write_text(
+        "Password,Times,Extra\n  abc  ,3,ignored\ndef,4,ignored\n", encoding="utf-8"
+    )
+
+    result = validate_data_file(str(input_path), str(report_path))
+
+    assert result == ValidationResult(True, [], 2, ["Password", "Times"])
+    assert report_path.read_text(encoding="utf-8") == (
+        "{\n"
+        '  "is_valid": true,\n'
+        '  "errors": [],\n'
+        '  "n_rows": 2,\n'
+        '  "columns": [\n'
+        '    "Password",\n'
+        '    "Times"\n'
+        "  ]\n"
+        "}"
+    )
+
+
+def test_validate_data_file_writes_invalid_report(tmp_path):
+    from training.validate_data import ValidationResult, validate_data_file
+
+    input_path = tmp_path / "passwords.csv"
+    report_path = tmp_path / "report.json"
+    input_path.write_text("Password,Times\nvalid,not-a-number\n", encoding="utf-8")
+
+    result = validate_data_file(str(input_path), str(report_path))
+
+    assert result == ValidationResult(
+        False, ["Column Times contains non-numeric values"], 0, []
+    )
+    assert report_path.read_text(encoding="utf-8") == (
+        "{\n"
+        '  "is_valid": false,\n'
+        '  "errors": [\n'
+        '    "Column Times contains non-numeric values"\n'
+        "  ],\n"
+        '  "n_rows": 0,\n'
+        '  "columns": []\n'
+        "}"
+    )
+
+
+def test_validate_data_file_writes_read_error_report(tmp_path):
+    from training.validate_data import validate_data_file
+
+    input_path = tmp_path / "missing.csv"
+    report_path = tmp_path / "report.json"
+
+    result = validate_data_file(str(input_path), str(report_path))
+
+    assert result.is_valid is False
+    assert result.n_rows == 0
+    assert result.columns == []
+    assert len(result.errors) == 1
+    assert result.errors[0].startswith("Failed to read CSV file:")
+    report_text = report_path.read_text(encoding="utf-8")
+    assert '"is_valid": false' in report_text
+    assert '"errors": [' in report_text
+    assert '"n_rows": 0' in report_text
+    assert '"columns": []' in report_text

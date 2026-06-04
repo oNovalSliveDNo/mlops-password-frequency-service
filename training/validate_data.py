@@ -1,7 +1,20 @@
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+
 import numpy as np
 import pandas as pd
+
+
+@dataclass(frozen=True)
+class ValidationResult:
+    is_valid: bool
+    errors: list[str]
+    n_rows: int
+    columns: list[str]
 
 
 def validate_password_dataframe(
@@ -74,17 +87,50 @@ def validate_password_dataframe(
     if invalid_times.any():
         errors.append("Column Times contains non-numeric values")
 
-    finite_times = np.isfinite(
-        cleaned_df["Times"].to_numpy(dtype=float, na_value=np.nan)
-    )
-    if not finite_times.all():
-        errors.append("Column Times contains infinite values")
+    # Дальше проверяем только числовые (не NaN) значения
+    valid_times_mask = ~cleaned_df["Times"].isna()
+    if valid_times_mask.any():
+        finite_times = np.isfinite(
+            cleaned_df.loc[valid_times_mask, "Times"].to_numpy(dtype=float)
+        )
+        if not finite_times.all():
+            errors.append("Column Times contains infinite values")
 
-    positive_times = cleaned_df["Times"] > 0
-    if not positive_times.all():
-        errors.append("Column Times must contain only positive values")
+        positive_times = cleaned_df.loc[valid_times_mask, "Times"] > 0
+        if not positive_times.all():
+            errors.append("Column Times must contain only positive values")
 
     if errors:
         return False, errors, None
 
     return True, [], cleaned_df
+
+
+def validate_data_file(
+    input_path: str, report_path: str = "validation_report.json"
+) -> ValidationResult:
+    try:
+        df = pd.read_csv(input_path)
+    except Exception as exc:
+        result = ValidationResult(False, [f"Failed to read CSV file: {exc}"], 0, [])
+    else:
+        is_valid, errors, cleaned_df = validate_password_dataframe(df)
+        if is_valid:
+            if cleaned_df is None:
+                raise RuntimeError("Validation succeeded without cleaned data")
+            result = ValidationResult(
+                True, [], len(cleaned_df.index), list(cleaned_df.columns)
+            )
+        else:
+            result = ValidationResult(False, errors, 0, [])
+
+    report = {
+        "is_valid": result.is_valid,
+        "errors": result.errors,
+        "n_rows": result.n_rows,
+        "columns": result.columns,
+    }
+    Path(report_path).write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return result
