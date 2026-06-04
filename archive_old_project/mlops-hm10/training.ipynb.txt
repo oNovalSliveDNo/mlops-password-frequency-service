@@ -1,0 +1,712 @@
+```python
+import pandas as pd
+import numpy as np
+from datetime import datetime
+
+from evidently.ui.workspace import Workspace
+from evidently import ColumnMapping
+from evidently.report import Report
+from evidently.metric_preset import DataQualityPreset, RegressionPreset
+from evidently.metrics import DatasetDriftMetric
+
+from evidently.ui.dashboards import DashboardPanelCounter
+from evidently.ui.dashboards import DashboardPanelPlot
+from evidently.ui.dashboards import PanelValue
+from evidently.ui.dashboards import PlotType
+from evidently.ui.dashboards import ReportFilter
+from evidently.ui.dashboards import CounterAgg
+from evidently.renderers.html_widgets import WidgetSize
+
+from evidently.test_suite import TestSuite
+
+from evidently.tests import (
+    TestValueMAPE,
+    TestValueRMSE,
+    TestShareOfMissingValues,
+    TestNumberOfConstantColumns,
+    TestNumberOfEmptyRows,
+    TestNumberOfEmptyColumns,
+    TestNumberOfDuplicatedColumns,
+    TestShareOfDriftedColumns,
+    TestNumberOfRows,
+    TestNumberOfColumns,
+)
+
+from evidently.ui.dashboards import (
+    DashboardPanelTestSuite,
+    DashboardPanelTestSuiteCounter,
+    TestFilter,
+    TestSuitePanelType,
+)
+
+try:
+    from evidently.tests.base_test import TestStatus
+except ImportError:
+    from evidently.test_suite import TestStatus
+
+import warnings
+warnings.filterwarnings('ignore')
+```
+
+---
+
+```python
+# текущее время
+now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+# создаем workspace и проект
+ws = Workspace.create("workspace")
+project = ws.create_project("KC - Homework")
+```
+
+---
+
+```python
+# Загружаем датасет 
+df = pd.read_csv("data_with_predictions.csv")
+
+df['start_date'] = pd.to_datetime(df.start_date)
+
+display(df.head(),
+        df.info(),
+        df.describe(include=[np.int64, np.float64]),
+        df.describe(exclude=[np.int64, np.float64])
+       )
+```
+
+---
+
+```
+<class 'pandas.core.frame.DataFrame'>
+RangeIndex: 41552 entries, 0 to 41551
+Data columns (total 21 columns):
+ #   Column                Non-Null Count  Dtype         
+---  ------                --------------  -----         
+ 0   bodyType              41552 non-null  object        
+ 1   brand                 41552 non-null  object        
+ 2   color                 41552 non-null  object        
+ 3   fuelType              41552 non-null  object        
+ 4   modelDate             41552 non-null  float64       
+ 5   name                  41552 non-null  object        
+ 6   numberOfDoors         41552 non-null  float64       
+ 7   productionDate        41552 non-null  int64         
+ 8   vehicleConfiguration  41552 non-null  object        
+ 9   vehicleTransmission   41552 non-null  object        
+ 10  engineDisplacement    41552 non-null  object        
+ 11  enginePower           41552 non-null  float64       
+ 12  mileage               41552 non-null  int64         
+ 13  Привод                41552 non-null  object        
+ 14  Руль                  41552 non-null  object        
+ 15  Владельцы             32078 non-null  float64       
+ 16  ПТС                   41402 non-null  object        
+ 17  price                 41552 non-null  float64       
+ 18  start_date            41552 non-null  datetime64[ns]
+ 19  model                 41552 non-null  object        
+ 20  pred                  41552 non-null  float64       
+dtypes: datetime64[ns](1), float64(6), int64(2), object(12)
+memory usage: 6.7+ MB
+None
+```
+
+---
+
+```python
+# ColumnMapping - чтобы evidently понял, где target и prediction
+column_mapping = ColumnMapping(
+    target='price',
+    prediction='pred'
+)
+```
+
+---
+
+```python
+# Разделияем его на reference и current
+mask = df.start_date >= pd.Timestamp('2020-09-01')
+reference = df.loc[~mask]
+current = df.loc[mask]
+
+print("Reference start_date range:")
+print(f"Min: {reference['start_date'].min()}")
+print(f"Max: {reference['start_date'].max()}")
+
+display(reference.shape)
+
+print("\nCurrent start_date range:")
+print(f"Min: {current['start_date'].min()}")
+print(f"Max: {current['start_date'].max()}")
+
+display(current.shape)
+```
+
+---
+
+```
+Reference start_date range:
+Min: 2020-08-01 01:07:10
+Max: 2020-08-31 23:35:34
+(24774, 21)
+
+Current start_date range:
+Min: 2020-09-01 00:05:42
+Max: 2020-09-09 10:49:25
+(16778, 21)
+```
+
+---
+
+```python
+# Построим report с evidently
+report = Report(
+    metrics=[
+        RegressionPreset(),
+        DataQualityPreset(),
+        DatasetDriftMetric(),
+    ],
+    tags=["ad_hoc", "current_vs_reference"],
+    metadata={
+        "report_type": "ad_hoc",
+        "period": "current_all",
+        "reference_period": "before_2020_09_01",
+        "current_period": "from_2020_09_01",
+    },
+)
+
+report.run(
+    reference_data=reference,
+    current_data=current,
+    column_mapping=column_mapping,
+)
+
+# логируем в UI
+ws.add_report(project.id, report)
+
+# Сохраняем этот репорт в файл
+with open("data_report.json", "w") as f:
+    f.write(report.json())
+```
+
+---
+
+```python
+# Для степа 19
+# Построим reports для каждого дня
+# current["date"] = current["start_date"].dt.date
+
+# daily_reports = {}
+
+# for date, group in current.groupby("date"):
+#     report = Report(
+#         metrics=[
+#             RegressionPreset(),
+#             DataQualityPreset(),
+#             DatasetDriftMetric(),
+#         ],
+#         tags=["daily", str(date)],
+#         metadata={
+#             "report_type": "daily",
+#             "date": str(date),
+#             "rows": len(group),
+#         },
+#     )
+    
+#     report.run(
+#         reference_data=reference,
+#         current_data=group,
+#         column_mapping=column_mapping,
+#     )
+    
+#     ws.add_report(project.id, report)
+#     daily_reports[date] = report
+```
+
+---
+
+```python
+# Для степа 19
+# sep_1 = current[
+#     current["start_date"].dt.date == pd.Timestamp("2020-09-01").date()
+# ].copy()
+
+# sep_1["hour"] = sep_1["start_date"].dt.hour
+
+# hourly_reports_sep_1 = {}
+
+# for hour, group in sep_1.groupby("hour"):
+#     report = Report(
+#         metrics=[
+#             RegressionPreset(),
+#             DataQualityPreset(),
+#             DatasetDriftMetric(),
+#         ],
+#         tags=["hourly", "2020-09-01", f"hour_{hour}"],
+#         metadata={
+#             "report_type": "hourly",
+#             "date": "2020-09-01",
+#             "hour": int(hour),
+#             "rows": len(group),
+#         },
+#     )
+    
+#     report.run(
+#         reference_data=reference,
+#         current_data=group,
+#         column_mapping=column_mapping,
+#     )
+    
+#     ws.add_report(project.id, report)
+#     hourly_reports_sep_1[hour] = report
+```
+
+---
+
+```python
+# Для степа 20
+current["date"] = current["start_date"].dt.date
+
+daily_reports = {}
+
+for date, group in current.groupby("date"):
+    report = Report(
+        metrics=[
+            RegressionPreset(),
+            DataQualityPreset(),
+            DatasetDriftMetric(),
+        ],
+        # timestamp должен быть датой данных + 1 день, т.к. это batch-мониторинг
+        timestamp=(pd.Timestamp(date) + pd.Timedelta(days=1)).to_pydatetime(),
+        tags=["daily", str(date)],
+        metadata={
+            "report_type": "daily",
+            "date": str(date),
+            "rows": len(group),
+        },
+    )
+    
+    report.run(
+        reference_data=reference,
+        current_data=group,
+        column_mapping=column_mapping,
+    )
+    
+    ws.add_report(project.id, report)
+    daily_reports[date] = report
+
+
+# Очищаем старые панели dashboard, если они были
+project.dashboard.panels = []
+
+# Фильтр: используем только daily reports
+daily_filter = ReportFilter(
+    metadata_values={},
+    tag_values=["daily"],
+)
+
+project.dashboard.add_panel(
+    DashboardPanelCounter(
+        title="KC - Homework: ML monitoring",
+        filter=daily_filter,
+        agg=CounterAgg.NONE,
+        size=WidgetSize.FULL,
+    )
+)
+
+project.dashboard.add_panel(
+    DashboardPanelPlot(
+        title="Number of Rows",
+        filter=daily_filter,
+        values=[
+            PanelValue(
+                metric_id="DatasetSummaryMetric",
+                field_path="current.number_of_rows",
+                legend="Rows",
+            ),
+        ],
+        plot_type=PlotType.LINE,
+        size=WidgetSize.HALF,
+    )
+)
+
+project.dashboard.add_panel(
+    DashboardPanelPlot(
+        title="MAPE",
+        filter=daily_filter,
+        values=[
+            PanelValue(
+                metric_id="RegressionQualityMetric",
+                field_path="current.mean_abs_perc_error",
+                legend="MAPE",
+            ),
+        ],
+        plot_type=PlotType.LINE,
+        size=WidgetSize.HALF,
+    )
+)
+
+project.dashboard.add_panel(
+    DashboardPanelPlot(
+        title="Share of drifting features",
+        filter=daily_filter,
+        values=[
+            PanelValue(
+                metric_id="DatasetDriftMetric",
+                field_path="share_of_drifted_columns",
+                legend="Share",
+            ),
+        ],
+        plot_type=PlotType.LINE,
+        size=WidgetSize.HALF,
+    )
+)
+
+project.dashboard.add_panel(
+    DashboardPanelPlot(
+        title="Mean Error",
+        filter=daily_filter,
+        values=[
+            PanelValue(
+                metric_id="RegressionQualityMetric",
+                field_path="current.mean_error",
+                legend="Mean Error",
+            ),
+        ],
+        plot_type=PlotType.LINE,
+        size=WidgetSize.HALF,
+    )
+)
+
+project.save()
+```
+
+---
+
+```python
+# Данные для тестов: убираем служебную колонку date, если она уже появилась
+reference_for_tests = reference.drop(columns=["date"], errors="ignore").copy()
+current_for_tests = current.drop(columns=["date"], errors="ignore").copy()
+
+current_slice = current_for_tests[
+    current_for_tests["start_date"].dt.date == pd.Timestamp("2020-09-01").date()
+].copy()
+
+print(reference_for_tests.shape)
+print(current_slice.shape)
+
+
+# Сначала запускаем тесты без ручных порогов
+probe_tests = TestSuite(
+    tests=[
+        TestValueMAPE(),
+        TestValueRMSE(),
+        TestShareOfMissingValues(),
+        TestNumberOfConstantColumns(),
+        TestNumberOfEmptyRows(),
+        TestNumberOfEmptyColumns(),
+        TestNumberOfDuplicatedColumns(),
+        TestShareOfDriftedColumns(),
+    ],
+    tags=["probe_tests", "2020-09-01"],
+    metadata={
+        "report_type": "probe_tests",
+        "data_date": "2020-09-01",
+    },
+)
+
+probe_tests.run(
+    reference_data=reference_for_tests,
+    current_data=current_slice,
+    column_mapping=column_mapping,
+)
+
+probe_dict = probe_tests.as_dict()
+
+for i, test in enumerate(probe_dict["tests"]):
+    print("=" * 100)
+    print("INDEX:", i)
+    print("NAME:", test.get("name"))
+    print("STATUS:", test.get("status"))
+    print("DESCRIPTION:", test.get("description"))
+    print("PARAMETERS:")
+    print(test.get("parameters"))
+```
+
+---
+
+```
+(24774, 21)
+(1746, 21)
+====================================================================================================
+INDEX: 0
+NAME: Mean Absolute Percentage Error (MAPE)
+STATUS: SUCCESS
+DESCRIPTION: The MAPE is 14.8. The test threshold is eq=16 ± 1.6.
+PARAMETERS:
+{'condition': {'eq': {'value': 15.957192549682611, 'relative': 0.1, 'absolute': 1e-12}}, 'value': 14.816148687335104}
+====================================================================================================
+INDEX: 1
+NAME: Root Mean Square Error (RMSE)
+STATUS: FAIL
+DESCRIPTION: The RMSE is 4.11e+05. The test threshold is eq=1e+06 ± 1e+05.
+PARAMETERS:
+{'condition': {'eq': {'value': 1001331.5518629244, 'relative': 0.1, 'absolute': 1e-12}}, 'value': 410755.16798060166}
+====================================================================================================
+INDEX: 2
+NAME: Share of Missing Values
+STATUS: FAIL
+DESCRIPTION: The share of missing values is 0.0154. The test threshold is lte=0.00967 ± 0.000967.
+PARAMETERS:
+{'condition': {'lte': {'value': 0.009674120717956997, 'relative': 0.1, 'absolute': 1e-12}}, 'value': 0.015409371079474172}
+====================================================================================================
+INDEX: 3
+...
+STATUS: FAIL
+DESCRIPTION: The drift is detected for 60% features (12 out of 20). The test threshold is lt=0.3
+PARAMETERS:
+{'condition': {'lt': 0.3}, 'features': {'price': {'stattest': 'Wasserstein distance (normed)', 'score': 0.103, 'threshold': 0.1, 'detected': True}, 'pred': {'stattest': 'Wasserstein distance (normed)', 'score': 0.114, 'threshold': 0.1, 'detected': True}, 'enginePower': {'stattest': 'Wasserstein distance (normed)', 'score': 0.152, 'threshold': 0.1, 'detected': True}, 'mileage': {'stattest': 'Wasserstein distance (normed)', 'score': 0.267, 'threshold': 0.1, 'detected': True}, 'modelDate': {'stattest': 'Wasserstein distance (normed)', 'score': 0.259, 'threshold': 0.1, 'detected': True}, 'numberOfDoors': {'stattest': 'Jensen-Shannon distance', 'score': 0.026, 'threshold': 0.1, 'detected': False}, 'productionDate': {'stattest': 'Wasserstein distance (normed)', 'score': 0.244, 'threshold': 0.1, 'detected': True}, 'Владельцы': {'stattest': 'Jensen-Shannon distance', 'score': 0.048, 'threshold': 0.1, 'detected': False}, 'bodyType': {'stattest': 'Jensen-Shannon distance', 'score': 0.104, 'threshold': 0.1, 'detected': True}, 'brand': {'stattest': 'Jensen-Shannon distance', 'score': 0.167, 'threshold': 0.1, 'detected': True}, 'color': {'stattest': 'Jensen-Shannon distance', 'score': 0.064, 'threshold': 0.1, 'detected': False}, 'engineDisplacement': {'stattest': 'Jensen-Shannon distance', 'score': 0.208, 'threshold': 0.1, 'detected': True}, 'fuelType': {'stattest': 'Jensen-Shannon distance', 'score': 0.037, 'threshold': 0.1, 'detected': False}, 'model': {'stattest': 'Jensen-Shannon distance', 'score': 0.316, 'threshold': 0.1, 'detected': True}, 'name': {'stattest': 'Jensen-Shannon distance', 'score': 0.448, 'threshold': 0.1, 'detected': True}, 'vehicleConfiguration': {'stattest': 'Jensen-Shannon distance', 'score': 0.318, 'threshold': 0.1, 'detected': True}, 'vehicleTransmission': {'stattest': 'Jensen-Shannon distance', 'score': 0.043, 'threshold': 0.1, 'detected': False}, 'ПТС': {'stattest': 'Jensen-Shannon distance', 'score': 0.043, 'threshold': 0.1, 'detected': False}, 'Привод': {'stattest': 'Jensen-Shannon distance', 'score': 0.042, 'threshold': 0.1, 'detected': False}, 'Руль': {'stattest': 'Jensen-Shannon distance', 'score': 0.022, 'threshold': 0.1, 'detected': False}}}
+```
+
+---
+
+```python
+tests = TestSuite(
+    tests=[
+        # 8 обязательных тестов из LMS
+        TestValueMAPE(lt=16),
+        TestValueRMSE(lt=5.1e5),
+        TestShareOfMissingValues(lt=0.0155),
+
+        TestNumberOfConstantColumns(eq=0),
+        TestNumberOfEmptyRows(eq=0),
+        TestNumberOfEmptyColumns(eq=0),
+        TestNumberOfDuplicatedColumns(eq=0),
+
+        TestShareOfDriftedColumns(lt=0.7),
+        
+        # 2 дополнительных теста
+        TestNumberOfRows(gt=0),
+        TestNumberOfColumns(eq=reference_for_tests.shape[1]),
+    ],
+    timestamp=(pd.Timestamp("2020-09-01") + pd.Timedelta(days=1)).to_pydatetime(),
+    tags=["calibration_tests", "2020-09-01"],
+    metadata={
+        "report_type": "daily_tests",
+        "data_date": "2020-09-01",
+        "report_date": "2020-09-02",
+    },
+)
+
+tests.run(
+    reference_data=reference_for_tests,
+    current_data=current_slice,
+    column_mapping=column_mapping,
+)
+
+# ws.add_test_suite(project.id, tests)
+
+with open("tests.json", "w") as f:
+    f.write(tests.json())
+```
+
+---
+
+```python
+def build_monitoring_tests(timestamp, data_date):
+    return TestSuite(
+        tests=[
+            # 8 обязательных тестов из LMS
+            TestValueMAPE(lt=16),
+            TestValueRMSE(lt=5.1e5),
+            TestShareOfMissingValues(lt=0.0155),
+
+            TestNumberOfConstantColumns(eq=0),
+            TestNumberOfEmptyRows(eq=0),
+            TestNumberOfEmptyColumns(eq=0),
+            TestNumberOfDuplicatedColumns(eq=0),
+
+            TestShareOfDriftedColumns(lt=0.7),
+
+            # 2 дополнительных теста
+            TestNumberOfRows(gt=0),
+            TestNumberOfColumns(eq=reference_for_tests.shape[1]),
+        ],
+        timestamp=timestamp,
+        tags=["daily_tests", str(data_date)],
+        metadata={
+            "report_type": "daily_tests",
+            "data_date": str(data_date),
+            "report_date": str(timestamp.date()),
+        },
+    )
+
+
+
+daily_test_suites = {}
+
+for date, group in current_for_tests.groupby(current_for_tests["start_date"].dt.date):
+    report_timestamp = pd.Timestamp(date) + pd.Timedelta(days=1)
+    
+    test_suite = build_monitoring_tests(
+        timestamp=report_timestamp.to_pydatetime(),
+        data_date=date,
+    )
+    
+    test_suite.run(
+        reference_data=reference_for_tests,
+        current_data=group,
+        column_mapping=column_mapping,
+    )
+    
+    ws.add_test_suite(project.id, test_suite)
+    daily_test_suites[date] = test_suite
+```
+
+---
+
+```python
+test_rows = []
+
+for data_date, suite in daily_test_suites.items():
+    suite_dict = suite.as_dict()
+    
+    for test_index, test in enumerate(suite_dict["tests"]):
+        test_rows.append({
+            "data_date": data_date,
+            "report_date": pd.Timestamp(data_date) + pd.Timedelta(days=1),
+            "test_index": test_index,
+            "test_name": test.get("name"),
+            "status": test.get("status"),
+            "description": test.get("description"),
+            "parameters": test.get("parameters"),
+            "is_base_test": test_index < 8,
+        })
+
+tests_df = pd.DataFrame(test_rows)
+tests_df
+```
+
+---
+
+```python
+sep8_fails = tests_df[
+    (tests_df["data_date"] == pd.Timestamp("2020-09-08").date())
+    & (tests_df["is_base_test"])
+    & (tests_df["status"].isin(["FAIL", "ERROR"]))
+]
+
+display(sep8_fails[["test_index", "test_name", "status", "description", "parameters"]])
+
+print("Ответ:", len(sep8_fails))
+```
+
+---
+
+```
+Ответ: 0
+```
+
+---
+
+```python
+drift_rows = []
+
+for data_date, report in daily_reports.items():
+    report_dict = report.as_dict()
+    
+    for metric in report_dict["metrics"]:
+        if metric["metric"] == "DatasetDriftMetric":
+            drift_rows.append({
+                "data_date": data_date,
+                "report_date": pd.Timestamp(data_date) + pd.Timedelta(days=1),
+                "share_of_drifted_columns": metric["result"]["share_of_drifted_columns"],
+                "number_of_drifted_columns": metric["result"]["number_of_drifted_columns"],
+            })
+
+drift_df = pd.DataFrame(drift_rows).sort_values("data_date")
+display(drift_df)
+
+answer_drift_sep3 = drift_df[
+    drift_df["data_date"] == pd.Timestamp("2020-09-03").date()
+]
+
+display(answer_drift_sep3)
+```
+
+---
+
+```python
+test_filter = ReportFilter(
+    metadata_values={},
+    tag_values=["daily_tests"],
+    include_test_suites=True,
+)
+
+project.dashboard.add_panel(
+    DashboardPanelTestSuite(
+        title="All tests: detailed",
+        filter=test_filter,
+        size=WidgetSize.FULL,
+        panel_type=TestSuitePanelType.DETAILED,
+        time_agg="1D",
+    )
+)
+
+project.dashboard.add_panel(
+    DashboardPanelTestSuite(
+        title="Failed tests: aggregate",
+        filter=test_filter,
+        size=WidgetSize.FULL,
+        panel_type=TestSuitePanelType.AGGREGATE,
+        statuses=[TestStatus.FAIL, TestStatus.ERROR],
+        time_agg="1D",
+    )
+)
+
+project.dashboard.add_panel(
+    DashboardPanelTestSuiteCounter(
+        title="Total failed tests",
+        filter=test_filter,
+        statuses=[TestStatus.FAIL, TestStatus.ERROR],
+        agg=CounterAgg.SUM,
+        size=WidgetSize.HALF,
+    )
+)
+
+project.save()
+```
+
+---
+
+```python
+failed_tests = tests_df[
+    tests_df["status"].isin(["FAIL", "ERROR"])
+].copy()
+
+failed_by_type = (
+    failed_tests
+    .groupby("test_name")
+    .size()
+    .sort_values(ascending=False)
+)
+
+display(failed_by_type)
+
+print("Количество разных типов сломавшихся тестов:", failed_by_type.shape[0])
+
+print("Самый часто ломающийся тест сломался раз:", failed_by_type.iloc[0])
+display(failed_by_type.head(10))
+```
+
+---
+
+```
+test_name
+Share of Missing Values                  4
+Mean Absolute Percentage Error (MAPE)    3
+dtype: int64
+Количество разных типов сломавшихся тестов: 2
+Самый часто ломающийся тест сломался раз: 4
+test_name
+Share of Missing Values                  4
+Mean Absolute Percentage Error (MAPE)    3
+dtype: int64
+```
