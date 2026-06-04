@@ -1,3 +1,7 @@
+from pathlib import Path
+
+import joblib
+
 import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
@@ -53,3 +57,16 @@ def train_password_model(df: pd.DataFrame) -> tuple[Pipeline, dict]:
         "ngram_max": 3,
         "tfidf": True,
     }
+
+
+def save_model_artifact(model, output_path: str = "artifacts/model.joblib") -> str:
+    """Save a local debug/CI model artifact without replacing MLflow registry use.
+
+    Production model registration remains in MLflow, where the ``prod`` alias
+    identifies the production model. The local artifact is intended only for
+    debugging and CI artifact collection.
+    """
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(model, path)
+    return str(path)
