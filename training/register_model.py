@@ -59,11 +59,17 @@ def _find_registered_model_version(
 
 
 def register_model_in_mlflow(
-    model, metrics: dict, validation_report: dict | None = None
+    model,
+    metrics: dict,
+    validation_report: dict | None = None,
+    model_alias: str | None = None,
 ) -> dict:
     mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
     model_name = os.getenv("MODEL_NAME")
-    model_alias = os.getenv("MODEL_ALIAS", "prod")
+    # Guarantee a string alias using an explicit check to satisfy type narrowing.
+    resolved_model_alias: str = (
+        model_alias if model_alias else os.getenv("MODEL_ALIAS", "prod")
+    )
     experiment_name = os.getenv(
         "MLFLOW_EXPERIMENT_NAME", "mlops-password-frequency-service"
     )
@@ -129,11 +135,11 @@ def register_model_in_mlflow(
             "Could not determine registered MLflow model version for this run."
         )
 
-    client.set_registered_model_alias(model_name, model_alias, version)
+    client.set_registered_model_alias(model_name, resolved_model_alias, version)
 
     return {
         "model_name": model_name,
-        "model_alias": model_alias,
+        "model_alias": resolved_model_alias,
         "model_version": str(version),
         "run_id": run_id,
     }

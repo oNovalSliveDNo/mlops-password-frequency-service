@@ -213,7 +213,7 @@ def test_run_training_pipeline_does_not_reload_when_registration_fails(monkeypat
         lambda model, output_path: "artifacts/model.joblib",
     )
 
-    def fail_registration(model, metrics, validation_report=None):
+    def fail_registration(model, metrics, validation_report=None, model_alias=None):
         calls.append("register")
         raise RuntimeError("mlflow is down")
 
@@ -266,8 +266,8 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch):
         lambda model, output_path: "artifacts/model.joblib",
     )
 
-    def register(model, metrics, validation_report=None):
-        calls.append(("register", validation_report))
+    def register(model, metrics, validation_report=None, model_alias=None):
+        calls.append(("register", validation_report, model_alias))
         return {"model_name": "passwords", "model_alias": "prod", "model_version": "1"}
 
     monkeypatch.setattr("training.run_pipeline.register_model_in_mlflow", register)
@@ -287,6 +287,7 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch):
                 "n_rows": 1,
                 "columns": ["Password", "Times"],
             },
+            "prod",
         ),
         "reload",
     ]
@@ -330,9 +331,9 @@ def test_run_training_pipeline_requires_reload_url_in_ci_after_registration(
     )
     monkeypatch.setattr(
         "training.run_pipeline.register_model_in_mlflow",
-        lambda model, metrics, validation_report=None: {
+        lambda model, metrics, validation_report=None, model_alias=None: {
             "model_name": "passwords",
-            "model_alias": "prod",
+            "model_alias": model_alias,
             "model_version": "1",
         },
     )

@@ -67,11 +67,19 @@ def save_model_artifact(model, output_path: str = _DEFAULT_MODEL_ARTIFACT_PATH) 
 
 
 def register_model_in_mlflow(
-    model, metrics: dict, validation_report: dict | None = None
+    model,
+    metrics: dict,
+    validation_report: dict | None = None,
+    model_alias: str | None = None,
 ) -> dict:
     from training.register_model import register_model_in_mlflow as register_model_impl
 
-    return register_model_impl(model, metrics, validation_report=validation_report)
+    return register_model_impl(
+        model,
+        metrics,
+        validation_report=validation_report,
+        model_alias=model_alias,
+    )
 
 
 def call_reload_model_endpoint() -> dict[str, Any]:
@@ -154,7 +162,7 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
 
     Reload is intentionally called only after these gates complete successfully:
     data download, data validation, model training, and MLflow registration with
-    the production alias set by ``register_model_in_mlflow``.
+    the production alias explicitly set for the training job.
     """
     resolved_data_url = data_url or os.getenv("DATA_URL")
     if not resolved_data_url:
@@ -198,11 +206,10 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
         model,
         metrics,
         validation_report=validation_report,
+        model_alias=_PRODUCTION_MODEL_ALIAS,
     )
 
-    reload_result = {"status": "skipped", "reason": "MODEL_ALIAS is not prod"}
-    if registration_result.get("model_alias") == _PRODUCTION_MODEL_ALIAS:
-        reload_result = call_reload_model_endpoint()
+    reload_result = call_reload_model_endpoint()
 
     return {
         "data_path": data_path,
