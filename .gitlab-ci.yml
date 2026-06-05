@@ -115,7 +115,7 @@ deploy:
     # --retry 10: делать до 10 попыток при сетевых сбоях
     # --retry-delay 5: ждать 5 секунд между попытками
     # -f: возвращать код ошибки, если HTTP-статус >= 400
-    - curl -f -X POST --retry 10 --retry-delay 5 "$RENDER_DEPLOY_HOOK"
+    - curl -k -f -X POST --retry 10 --retry-delay 5 "$RENDER_DEPLOY_HOOK"
 
 # =========================
 # TRAIN: triggered from FastAPI /trigger
