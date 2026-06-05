@@ -17,7 +17,7 @@ RUN python -m pip install --upgrade pip \
     && pip install --no-cache-dir -r requirements-app.txt
 
 COPY app ./app
-COPY training ./training
+COPY training/__init__.py training/entropy.py ./training/
 
 RUN useradd --create-home --shell /bin/bash appuser \
     && chown -R appuser:appuser /app

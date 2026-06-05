@@ -1,27 +1,35 @@
+# Git metadata
 .git
 .gitignore
 .gitattributes
+.gitlab-ci.yml
 
+# Local IDE/editor state
 .idea
 .vscode
 
+# Local virtual environments and environment files
 venv
 .venv
 env
 .env
 .env.*
+.env.example
 
+# Python caches and compiled files
 __pycache__
-*.pyc
-*.pyo
-*.pyd
-
+*.py[cod]
+*$py.class
+*.so
+# Tool caches and reports
 .pytest_cache
 .ruff_cache
 .mypy_cache
 .coverage
 htmlcov
+.cache
 
+# Runtime, training, and experiment outputs
 data
 datasets
 artifacts
@@ -31,22 +39,31 @@ tmp
 temp
 
 models
+mlruns
+mlartifacts
+workspace
 *.joblib
 *.pkl
 *.pickle
 
-mlruns
-mlartifacts
-workspace
+# Development-only source and configuration
+tests
+docs
+examples
+archive_old_project
+pyproject.toml
+requirements.txt
+requirements-dev.txt
+requirements-train.txt
+amvera.yml
+README.md
+LICENSE
 
-# reference/archive
-archive_old_project/
-
+# OS/log noise
 *.log
 .DS_Store
 Thumbs.db
 
-README.md
-LICENSE
-tests
-docs
+*.egg-info
+dist
+build
