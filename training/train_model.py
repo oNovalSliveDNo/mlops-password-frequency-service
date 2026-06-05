@@ -15,7 +15,7 @@ from training.entropy import TextEntropyTransformer
 def train_password_model(df: pd.DataFrame) -> tuple[Pipeline, dict]:
     passwords = df["Password"]
     times = pd.to_numeric(df["Times"])
-    target = np.log10(times)
+    target = np.log10(times + 1)
 
     pipeline = Pipeline(
         [

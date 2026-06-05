@@ -140,9 +140,9 @@ def validate_password_dataframe(
         if not finite_times.all():
             errors.append("Column Times contains infinite values")
 
-        positive_times = cleaned_df.loc[valid_times_mask, "Times"] > 0
-        if not positive_times.all():
-            errors.append("Column Times must contain only positive values")
+        non_negative_times = cleaned_df.loc[valid_times_mask, "Times"] >= 0
+        if not non_negative_times.all():
+            errors.append("Column Times must contain only non-negative values")
 
     if errors:
         return False, errors, None

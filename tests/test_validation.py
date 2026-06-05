@@ -47,14 +47,24 @@ def test_empty_password_is_invalid():
     assert any("empty values" in error for error in errors)
 
 
-def test_non_positive_times_is_invalid():
-    df = pd.DataFrame({"Password": ["qwerty", "123456"], "Times": [0, -1]})
+def test_zero_times_is_valid():
+    df = pd.DataFrame({"Password": ["qwerty"], "Times": [0]})
+
+    is_valid, errors, cleaned_df = validate_password_dataframe(df)
+
+    assert is_valid is True
+    assert errors == []
+    assert cleaned_df is not None
+
+
+def test_negative_times_is_invalid():
+    df = pd.DataFrame({"Password": ["qwerty"], "Times": [-1]})
 
     is_valid, errors, cleaned_df = validate_password_dataframe(df)
 
     assert is_valid is False
     assert cleaned_df is None
-    assert any("positive" in error for error in errors)
+    assert any("non-negative" in error for error in errors)
 
 
 def test_non_numeric_times_is_invalid():
@@ -134,7 +144,7 @@ def test_validate_password_dataframe_rejects_invalid_values():
     assert any("Password contains missing" in error for error in errors)
     assert any("empty values" in error for error in errors)
     assert any("infinite" in error for error in errors)
-    assert any("positive" in error for error in errors)
+    assert any("non-negative" in error for error in errors)
 
 
 def test_validate_data_file_writes_invalid_report(tmp_path):
