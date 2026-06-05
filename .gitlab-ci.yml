@@ -98,7 +98,7 @@ build:
       --compressed-caching=false
 
 # =========================
-# DEPLOY: Render deploy hook
+# DEPLOY: Amvera
 # =========================
 deploy:
   stage: deploy
