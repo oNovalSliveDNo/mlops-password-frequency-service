@@ -11,10 +11,10 @@ RUN apt-get update \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY requirements-app.txt .
 
 RUN python -m pip install --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+    && pip install --no-cache-dir -r requirements-app.txt
 
 COPY app ./app
 COPY training ./training

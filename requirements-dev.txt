@@ -1,0 +1,6 @@
+-r requirements-app.txt
+-r requirements-train.txt
+pytest==9.0.3
+httpx==0.28.1
+ruff==0.15.15
+mypy==1.19.1

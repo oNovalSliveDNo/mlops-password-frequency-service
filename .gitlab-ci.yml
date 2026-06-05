@@ -35,7 +35,7 @@ lint:
     - if: '$CI_PIPELINE_SOURCE == "push"'
   before_script:
     - python -m pip install --upgrade pip
-    - pip install -r requirements.txt
+    - pip install ruff==0.15.15
   script:
     - ruff check .
 
@@ -49,7 +49,7 @@ format:
     - if: '$CI_PIPELINE_SOURCE == "push"'
   before_script:
     - python -m pip install --upgrade pip
-    - pip install -r requirements.txt
+    - pip install ruff==0.15.15
   script:
     - ruff format --check .
 
@@ -63,7 +63,7 @@ test:
     - if: '$CI_PIPELINE_SOURCE == "push"'
   before_script:
     - python -m pip install --upgrade pip
-    - pip install -r requirements.txt
+    - pip install -r requirements-dev.txt
   script:
     - pytest -q
 
@@ -183,7 +183,7 @@ train_model:
     - when: never
   before_script:
     - python -m pip install --upgrade pip
-    - pip install -r requirements.txt
+    - pip install -r requirements-train.txt
   script:
     - |
       if [ -z "$DATA_URL" ]; then
