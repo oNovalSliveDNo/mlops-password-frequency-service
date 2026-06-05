@@ -2,6 +2,8 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 import requests
 from training.run_pipeline import (
@@ -20,6 +22,11 @@ class ValidationResult:
     errors: list[str]
     n_rows: int
     columns: list[str]
+
+
+class FakeTrainingFrame:
+    def __getitem__(self, key):
+        return self
 
 
 class FakeResponse:
@@ -323,6 +330,94 @@ def test_run_training_pipeline_stops_on_invalid_data(monkeypatch, caplog):
     assert calls == []
 
 
+def test_run_training_pipeline_stops_on_failed_model_quality(
+    tmp_path, monkeypatch, caplog
+):
+    from training.run_pipeline import run_training_pipeline
+
+    validation_report_path = tmp_path / "validation_report.json"
+    training_df = FakeTrainingFrame()
+    calls = []
+
+    monkeypatch.setenv("DATA_URL", "https://example.com/data.csv")
+    monkeypatch.setattr(
+        "training.run_pipeline._DEFAULT_VALIDATION_REPORT_PATH",
+        str(validation_report_path),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.download_data",
+        lambda data_url, output_path: "downloaded.csv",
+    )
+    monkeypatch.setattr("training.run_pipeline.read_csv", lambda path: object())
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_data_file",
+        lambda input_path, report_path: ValidationResult(
+            True, [], 1, ["Password", "Times"]
+        ),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_password_dataframe",
+        lambda df: (True, [], training_df, {"n_rows": 1}),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_model_quality_with_prod_model",
+        lambda df: SimpleNamespace(
+            is_valid=False,
+            errors=["rmse too high for token abc123"],
+            metrics={"rmse": 2.0},
+            scored_df=FakeTrainingFrame(),
+        ),
+    )
+
+    def fail_if_called(name):
+        def inner(*args, **kwargs):
+            calls.append(name)
+            pytest.fail(f"{name} must not be called after model-quality failure")
+
+        return inner
+
+    monkeypatch.setattr(
+        "training.run_pipeline.run_evidently_tests", fail_if_called("evidently")
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.train_password_model", fail_if_called("train")
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.save_model_artifact", fail_if_called("save")
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.register_model_in_mlflow", fail_if_called("register")
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.call_reload_model_endpoint", fail_if_called("reload")
+    )
+
+    with caplog.at_level(logging.INFO):
+        result = run_training_pipeline()
+
+    assert result == {
+        "status": "validation_failed",
+        "data_path": "downloaded.csv",
+        "validation_report": {
+            "is_valid": False,
+            "errors": ["rmse too high for token abc123"],
+            "n_rows": 1,
+            "columns": ["Password", "Times"],
+            "schema_metrics": None,
+            "model_quality_metrics": {"rmse": 2.0},
+        },
+        "errors": ["rmse too high for token abc123"],
+    }
+    assert (
+        json.loads(validation_report_path.read_text(encoding="utf-8"))
+        == result["validation_report"]
+    )
+    assert (
+        "model quality validation failed: rmse too high for token abc123" in caplog.text
+    )
+    assert calls == []
+
+
 def test_main_allows_validation_failed_result(monkeypatch):
     from training.run_pipeline import main
 
@@ -438,6 +533,8 @@ def test_run_training_pipeline_does_not_reload_when_registration_fails(monkeypat
 
     calls = []
 
+    training_df = FakeTrainingFrame()
+
     monkeypatch.setenv("DATA_URL", "https://example.com/data.csv")
     monkeypatch.setattr(
         "training.run_pipeline.download_data",
@@ -456,7 +553,16 @@ def test_run_training_pipeline_does_not_reload_when_registration_fails(monkeypat
     )
     monkeypatch.setattr(
         "training.run_pipeline.validate_password_dataframe",
-        lambda df: (True, [], object(), None),
+        lambda df: (True, [], training_df, None),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_model_quality_with_prod_model",
+        lambda df: SimpleNamespace(
+            is_valid=True,
+            errors=[],
+            metrics={"rmse": 0.1},
+            scored_df=None,
+        ),
     )
     monkeypatch.setattr(
         "training.run_pipeline.train_password_model",
@@ -491,6 +597,8 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
 
     calls = []
 
+    training_df = FakeTrainingFrame()
+
     monkeypatch.setenv("DATA_URL", "https://example.com/data.csv")
     monkeypatch.setattr(
         "training.run_pipeline.download_data",
@@ -509,7 +617,16 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
     )
     monkeypatch.setattr(
         "training.run_pipeline.validate_password_dataframe",
-        lambda df: (True, [], object(), None),
+        lambda df: (True, [], training_df, None),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_model_quality_with_prod_model",
+        lambda df: SimpleNamespace(
+            is_valid=True,
+            errors=[],
+            metrics={"rmse": 0.1},
+            scored_df=None,
+        ),
     )
     monkeypatch.setattr(
         "training.run_pipeline.train_password_model",
@@ -563,6 +680,8 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
                 "errors": [],
                 "n_rows": 1,
                 "columns": ["Password", "Times"],
+                "schema_metrics": None,
+                "model_quality_metrics": {"rmse": 0.1},
             },
             "prod",
         ),
@@ -614,6 +733,8 @@ def test_run_training_pipeline_requires_reload_url_in_ci_after_registration(
 ):
     from training.run_pipeline import run_training_pipeline
 
+    training_df = FakeTrainingFrame()
+
     monkeypatch.setenv("DATA_URL", "https://example.com/data.csv")
     monkeypatch.setenv("CI", "true")
     monkeypatch.delenv("SERVICE_RELOAD_URL", raising=False)
@@ -634,7 +755,16 @@ def test_run_training_pipeline_requires_reload_url_in_ci_after_registration(
     )
     monkeypatch.setattr(
         "training.run_pipeline.validate_password_dataframe",
-        lambda df: (True, [], object(), None),
+        lambda df: (True, [], training_df, None),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_model_quality_with_prod_model",
+        lambda df: SimpleNamespace(
+            is_valid=True,
+            errors=[],
+            metrics={"rmse": 0.1},
+            scored_df=None,
+        ),
     )
     monkeypatch.setattr(
         "training.run_pipeline.train_password_model",

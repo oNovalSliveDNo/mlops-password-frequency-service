@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import time
@@ -6,7 +7,6 @@ from typing import Any
 from urllib.parse import urljoin, urlparse, urlunparse
 
 import requests
-
 
 _RELOAD_ATTEMPTS = 3
 _RELOAD_RETRY_DELAY_SECONDS = 10
@@ -89,6 +89,14 @@ def validate_password_dataframe(df):
     )
 
     return validate_password_dataframe_impl(df)
+
+
+def validate_model_quality_with_prod_model(df):
+    from training.model_quality_validation import (
+        validate_model_quality_with_prod_model as impl,
+    )
+
+    return impl(df)
 
 
 def train_password_model(df):
@@ -392,8 +400,29 @@ def _validation_report_dict(validation_result) -> dict[str, Any]:
         "columns": validation_result.columns,
     }
     if hasattr(validation_result, "metrics"):
-        report["metrics"] = validation_result.metrics
+        report["schema_metrics"] = validation_result.metrics
     return report
+
+
+def _merged_validation_report_dict(
+    schema_result, model_quality_result
+) -> dict[str, Any]:
+    return {
+        "is_valid": schema_result.is_valid and model_quality_result.is_valid,
+        "errors": [*schema_result.errors, *model_quality_result.errors],
+        "n_rows": schema_result.n_rows,
+        "columns": schema_result.columns,
+        "schema_metrics": getattr(schema_result, "metrics", None),
+        "model_quality_metrics": model_quality_result.metrics,
+    }
+
+
+def _write_validation_report(report: dict[str, Any], report_path: str) -> None:
+    output_file = Path(report_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
@@ -414,10 +443,10 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
 
     data_path = download_data(resolved_data_url, _DEFAULT_DATA_PATH)
     logger.info("data downloaded: %s", _sanitize_for_log(data_path))
-    validation_result = validate_data_file(data_path, _DEFAULT_VALIDATION_REPORT_PATH)
-    validation_report = _validation_report_dict(validation_result)
-    if not validation_result.is_valid:
-        errors = validation_result.errors
+    schema_result = validate_data_file(data_path, _DEFAULT_VALIDATION_REPORT_PATH)
+    validation_report = _validation_report_dict(schema_result)
+    if not schema_result.is_valid:
+        errors = schema_result.errors
         error_message = "; ".join(errors) or "unknown validation error"
         logger.info("validation failed: %s", _sanitize_for_log(error_message))
         return {
@@ -429,8 +458,8 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
 
     logger.info("validation passed")
 
-    if hasattr(validation_result, "cleaned_df"):
-        training_df = validation_result.cleaned_df
+    if hasattr(schema_result, "cleaned_df"):
+        training_df = schema_result.cleaned_df
         if training_df is None:
             raise RuntimeError(
                 "Data validation succeeded but cleaned data is missing; "
@@ -441,8 +470,34 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
         # ValidationResult-like objects without the new cleaned_df field.
         training_df = _read_validated_training_dataframe(data_path)
 
-    evidently_report = run_evidently_tests(training_df, _DEFAULT_EVIDENTLY_REPORT_PATH)
-    model, metrics = train_password_model(training_df)
+    model_quality_result = validate_model_quality_with_prod_model(training_df)
+    validation_report = _merged_validation_report_dict(
+        schema_result, model_quality_result
+    )
+    _write_validation_report(validation_report, _DEFAULT_VALIDATION_REPORT_PATH)
+
+    if not model_quality_result.is_valid:
+        errors = validation_report["errors"]
+        error_message = "; ".join(errors) or "unknown model quality validation error"
+        logger.info(
+            "model quality validation failed: %s", _sanitize_for_log(error_message)
+        )
+        return {
+            "status": "validation_failed",
+            "data_path": data_path,
+            "validation_report": validation_report,
+            "errors": errors,
+        }
+
+    evidently_input_df = (
+        model_quality_result.scored_df
+        if model_quality_result.scored_df is not None
+        else training_df
+    )
+    evidently_report = run_evidently_tests(
+        evidently_input_df, _DEFAULT_EVIDENTLY_REPORT_PATH
+    )
+    model, metrics = train_password_model(training_df[["Password", "Times"]])
     logger.info("model trained")
     model_artifact_path = save_model_artifact(model, _DEFAULT_MODEL_ARTIFACT_PATH)
 
