@@ -375,7 +375,7 @@ def call_reload_model_endpoint(
 def _read_validated_training_dataframe(data_path: str):
     """Read and clean training data after the file-level validation passed."""
     raw_df = read_csv(data_path)
-    is_valid, errors, cleaned_df = validate_password_dataframe(raw_df)
+    is_valid, errors, cleaned_df, _metrics = validate_password_dataframe(raw_df)
     if not is_valid or cleaned_df is None:
         raise RuntimeError(
             "Data validation failed after validation gate passed: " + "; ".join(errors)
@@ -385,12 +385,15 @@ def _read_validated_training_dataframe(data_path: str):
 
 
 def _validation_report_dict(validation_result) -> dict[str, Any]:
-    return {
+    report = {
         "is_valid": validation_result.is_valid,
         "errors": validation_result.errors,
         "n_rows": validation_result.n_rows,
         "columns": validation_result.columns,
     }
+    if hasattr(validation_result, "metrics"):
+        report["metrics"] = validation_result.metrics
+    return report
 
 
 def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:

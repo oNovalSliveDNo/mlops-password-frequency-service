@@ -456,7 +456,7 @@ def test_run_training_pipeline_does_not_reload_when_registration_fails(monkeypat
     )
     monkeypatch.setattr(
         "training.run_pipeline.validate_password_dataframe",
-        lambda df: (True, [], object()),
+        lambda df: (True, [], object(), None),
     )
     monkeypatch.setattr(
         "training.run_pipeline.train_password_model",
@@ -509,7 +509,7 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
     )
     monkeypatch.setattr(
         "training.run_pipeline.validate_password_dataframe",
-        lambda df: (True, [], object()),
+        lambda df: (True, [], object(), None),
     )
     monkeypatch.setattr(
         "training.run_pipeline.train_password_model",
@@ -634,7 +634,7 @@ def test_run_training_pipeline_requires_reload_url_in_ci_after_registration(
     )
     monkeypatch.setattr(
         "training.run_pipeline.validate_password_dataframe",
-        lambda df: (True, [], object()),
+        lambda df: (True, [], object(), None),
     )
     monkeypatch.setattr(
         "training.run_pipeline.train_password_model",
