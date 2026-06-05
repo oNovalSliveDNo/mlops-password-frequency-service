@@ -102,14 +102,65 @@ build:
 # =========================
 deploy:
   stage: deploy
-  image: alpine:3.20
+  image: python:3.11-slim
   rules:
     - if: '$CI_PIPELINE_SOURCE == "push"'
   needs:
     - build
+  before_script:
+    - apt-get update
+    - apt-get install -y --no-install-recommends git
+    - rm -rf /var/lib/apt/lists/*
   script:
-    - echo "Docker image was pushed to DockerHub."
-    - echo "Render deployment is triggered by DockerHub webhook or can be run manually."
+    - |
+      if [ -z "$AMVERA_GIT_URL" ] || [ -z "$AMVERA_USERNAME" ] || [ -z "$AMVERA_PASSWORD" ]; then
+        echo "AMVERA_GIT_URL, AMVERA_USERNAME and AMVERA_PASSWORD must be set"
+        exit 1
+      fi
+
+    - |
+      cat > amvera.yml <<EOF
+      build:
+        skip: yes
+
+      run:
+        image: ${DOCKER_IMAGE}:latest
+        persistenceMount: /data
+        containerPort: "8000"
+      EOF
+
+    - echo "Generated amvera.yml:"
+    - cat amvera.yml
+
+    - git config --global user.email "gitlab-ci@example.com"
+    - git config --global user.name "GitLab CI"
+
+    - mkdir amvera-deploy
+    - cp amvera.yml amvera-deploy/amvera.yml
+    - cd amvera-deploy
+
+    - git init
+    - git checkout -b master
+    - git add amvera.yml
+    - git commit -m "Deploy ${DOCKER_IMAGE}:latest to Amvera"
+
+    - |
+      AMVERA_AUTH_URL="$(python - <<'PY'
+      import os
+      from urllib.parse import quote, urlparse, urlunparse
+
+      raw_url = os.environ["AMVERA_GIT_URL"]
+      username = quote(os.environ["AMVERA_USERNAME"], safe="")
+      password = quote(os.environ["AMVERA_PASSWORD"], safe="")
+
+      parsed = urlparse(raw_url)
+      netloc = f"{username}:{password}@{parsed.netloc}"
+      print(urlunparse((parsed.scheme, netloc, parsed.path, "", "", "")))
+      PY
+      )"
+
+      git remote add amvera "$AMVERA_AUTH_URL"
+      git push --force amvera master:master
 
 # =========================
 # TRAIN: triggered from FastAPI /trigger
