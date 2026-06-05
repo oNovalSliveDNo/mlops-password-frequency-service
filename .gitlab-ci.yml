@@ -114,6 +114,19 @@ deploy:
         exit 1
       fi
     - echo "Trigger Render deploy"
+    - python - <<'PY'
+      import os
+      from urllib.parse import urlparse
+
+      url = os.environ.get("RENDER_DEPLOY_HOOK", "")
+      parsed = urlparse(url)
+
+      print("scheme:", parsed.scheme)
+      print("host:", parsed.hostname)
+      print("path starts with /deploy:", parsed.path.startswith("/deploy"))
+      print("query exists:", bool(parsed.query))
+      print("url length:", len(url))
+      PY
     - curl --retry 10 --retry-all-errors --retry-delay 5 --max-time 60 --fail -X POST "$RENDER_DEPLOY_HOOK"
 
 # =========================
