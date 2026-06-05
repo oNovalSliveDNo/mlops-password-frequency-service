@@ -24,6 +24,40 @@ class ValidationResult:
     columns: list[str]
 
 
+@dataclass
+class ModelQualityValidationResult:
+    is_valid: bool
+    errors: list[str]
+    metrics: dict
+    scored_df: object | None = None
+
+
+class FakeDataFrame:
+    def __init__(self, data):
+        self._data = {key: list(value) for key, value in data.items()}
+        self.columns = list(self._data)
+        row_count = len(next(iter(self._data.values()))) if self._data else 0
+        self.index = list(range(row_count))
+
+    def __getitem__(self, key):
+        if isinstance(key, list):
+            return FakeDataFrame({column: self._data[column] for column in key})
+
+        return self._data[key]
+
+    def assign(self, **kwargs):
+        data = {key: list(value) for key, value in self._data.items()}
+        for key, value in kwargs.items():
+            data[key] = list(value)
+        return FakeDataFrame(data)
+
+    def copy(self):
+        return FakeDataFrame(self._data)
+
+    def equals(self, other):
+        return isinstance(other, FakeDataFrame) and self._data == other._data
+
+
 class FakeTrainingFrame:
     def __getitem__(self, key):
         return self
@@ -272,10 +306,17 @@ def test_verify_serving_after_reload_rejects_stale_loaded_version(monkeypatch):
         )
 
 
-def test_run_training_pipeline_stops_on_invalid_data(monkeypatch, caplog):
+def test_run_training_pipeline_stops_on_invalid_schema_validation(monkeypatch, caplog):
     from training.run_pipeline import run_training_pipeline
 
     calls = []
+
+    def fail_if_called(name):
+        def inner(*args, **kwargs):
+            calls.append(name)
+            pytest.fail(f"{name} must not be called after schema validation failure")
+
+        return inner
 
     monkeypatch.setenv("DATA_URL", "https://example.com/data.csv")
     monkeypatch.setattr(
@@ -284,31 +325,35 @@ def test_run_training_pipeline_stops_on_invalid_data(monkeypatch, caplog):
     )
     monkeypatch.setattr(
         "training.run_pipeline._read_validated_training_dataframe",
-        lambda data_path: calls.append("read_validated"),
-    )
-    monkeypatch.setattr(
-        "training.run_pipeline.run_evidently_tests",
-        lambda df, output_path: calls.append("evidently"),
+        fail_if_called("read_validated"),
     )
     monkeypatch.setattr(
         "training.run_pipeline.validate_data_file",
         lambda input_path, report_path: ValidationResult(False, ["bad data"], 0, []),
     )
     monkeypatch.setattr(
+        "training.run_pipeline.validate_model_quality_with_prod_model",
+        fail_if_called("model_quality"),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.run_evidently_tests",
+        fail_if_called("evidently"),
+    )
+    monkeypatch.setattr(
         "training.run_pipeline.train_password_model",
-        lambda df: calls.append("train"),
+        fail_if_called("train"),
     )
     monkeypatch.setattr(
         "training.run_pipeline.save_model_artifact",
-        lambda model, output_path: calls.append("save"),
+        fail_if_called("save"),
     )
     monkeypatch.setattr(
         "training.run_pipeline.register_model_in_mlflow",
-        lambda model, metrics, validation_report=None: calls.append("register"),
+        fail_if_called("register"),
     )
     monkeypatch.setattr(
         "training.run_pipeline.call_reload_model_endpoint",
-        lambda *_args, **_kwargs: calls.append("reload"),
+        fail_if_called("reload"),
     )
 
     with caplog.at_level(logging.INFO):
@@ -336,7 +381,14 @@ def test_run_training_pipeline_stops_on_failed_model_quality(
     from training.run_pipeline import run_training_pipeline
 
     validation_report_path = tmp_path / "validation_report.json"
-    training_df = FakeTrainingFrame()
+    training_df = FakeDataFrame(
+        {"Password": ["hunter2"], "Times": [10], "source_row": [42]}
+    )
+    scored_df = training_df.assign(
+        target_log=[1.0], prediction=[3.0], prediction_error=[2.0]
+    )
+    schema_metrics = {"row_count": 1, "null_passwords": 0}
+    model_quality_metrics = {"rmse": 2.0, "mae": 2.0}
     calls = []
 
     monkeypatch.setenv("DATA_URL", "https://example.com/data.csv")
@@ -348,24 +400,24 @@ def test_run_training_pipeline_stops_on_failed_model_quality(
         "training.run_pipeline.download_data",
         lambda data_url, output_path: "downloaded.csv",
     )
-    monkeypatch.setattr("training.run_pipeline.read_csv", lambda path: object())
     monkeypatch.setattr(
         "training.run_pipeline.validate_data_file",
-        lambda input_path, report_path: ValidationResult(
-            True, [], 1, ["Password", "Times"]
+        lambda input_path, report_path: SimpleNamespace(
+            is_valid=True,
+            errors=[],
+            n_rows=1,
+            columns=["Password", "Times"],
+            metrics=schema_metrics,
+            cleaned_df=training_df,
         ),
     )
     monkeypatch.setattr(
-        "training.run_pipeline.validate_password_dataframe",
-        lambda df: (True, [], training_df, {"n_rows": 1}),
-    )
-    monkeypatch.setattr(
         "training.run_pipeline.validate_model_quality_with_prod_model",
-        lambda df: SimpleNamespace(
-            is_valid=False,
-            errors=["rmse too high for token abc123"],
-            metrics={"rmse": 2.0},
-            scored_df=FakeTrainingFrame(),
+        lambda df: ModelQualityValidationResult(
+            False,
+            ["rmse too high for token abc123"],
+            model_quality_metrics,
+            scored_df,
         ),
     )
 
@@ -389,12 +441,21 @@ def test_run_training_pipeline_stops_on_failed_model_quality(
         "training.run_pipeline.register_model_in_mlflow", fail_if_called("register")
     )
     monkeypatch.setattr(
+        "training.run_pipeline._ensure_registration_alias_verified",
+        fail_if_called("verify_alias"),
+    )
+    monkeypatch.setattr(
         "training.run_pipeline.call_reload_model_endpoint", fail_if_called("reload")
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.verify_serving_after_reload",
+        fail_if_called("verify_serving"),
     )
 
     with caplog.at_level(logging.INFO):
         result = run_training_pipeline()
 
+    assert result["status"] == "validation_failed"
     assert result == {
         "status": "validation_failed",
         "data_path": "downloaded.csv",
@@ -403,15 +464,15 @@ def test_run_training_pipeline_stops_on_failed_model_quality(
             "errors": ["rmse too high for token abc123"],
             "n_rows": 1,
             "columns": ["Password", "Times"],
-            "schema_metrics": None,
-            "model_quality_metrics": {"rmse": 2.0},
+            "schema_metrics": schema_metrics,
+            "model_quality_metrics": model_quality_metrics,
         },
         "errors": ["rmse too high for token abc123"],
     }
-    assert (
-        json.loads(validation_report_path.read_text(encoding="utf-8"))
-        == result["validation_report"]
-    )
+    written_report = json.loads(validation_report_path.read_text(encoding="utf-8"))
+    assert written_report == result["validation_report"]
+    assert written_report["schema_metrics"] == schema_metrics
+    assert written_report["model_quality_metrics"] == model_quality_metrics
     assert (
         "model quality validation failed: rmse too high for token abc123" in caplog.text
     )
@@ -751,75 +812,104 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
     from training.run_pipeline import run_training_pipeline
 
     calls = []
-
-    training_df = FakeTrainingFrame()
+    schema_metrics = {"row_count": 2, "null_passwords": 0}
+    model_quality_metrics = {"rmse": 0.1, "mae": 0.05}
+    training_df = FakeDataFrame(
+        {
+            "Password": ["alpha", "beta"],
+            "Times": [10, 20],
+            "source_row": [1, 2],
+        }
+    )
+    scored_df = training_df.assign(
+        target_log=[1.0, 2.0], prediction=[1.1, 2.1], prediction_error=[0.1, 0.1]
+    )
+    merged_validation_report = {
+        "is_valid": True,
+        "errors": [],
+        "n_rows": 2,
+        "columns": ["Password", "Times"],
+        "schema_metrics": schema_metrics,
+        "model_quality_metrics": model_quality_metrics,
+    }
+    registration_result = {
+        "model_name": "passwords",
+        "model_alias": "prod",
+        "model_version": "1",
+        "model_uri": "models:/passwords/1",
+        "alias_verified": True,
+        "verified_model_version": "1",
+    }
 
     monkeypatch.setenv("DATA_URL", "https://example.com/data.csv")
     monkeypatch.setattr(
         "training.run_pipeline.download_data",
         lambda data_url, output_path: "downloaded.csv",
     )
-    monkeypatch.setattr("training.run_pipeline.read_csv", lambda path: object())
-    monkeypatch.setattr(
-        "training.run_pipeline.run_evidently_tests",
-        lambda df, output_path: {"status": "success"},
-    )
     monkeypatch.setattr(
         "training.run_pipeline.validate_data_file",
-        lambda input_path, report_path: ValidationResult(
-            True, [], 1, ["Password", "Times"]
-        ),
-    )
-    monkeypatch.setattr(
-        "training.run_pipeline.validate_password_dataframe",
-        lambda df: (True, [], training_df, None),
-    )
-    monkeypatch.setattr(
-        "training.run_pipeline.validate_model_quality_with_prod_model",
-        lambda df: SimpleNamespace(
+        lambda input_path, report_path: SimpleNamespace(
             is_valid=True,
             errors=[],
-            metrics={"rmse": 0.1},
-            scored_df=None,
+            n_rows=2,
+            columns=["Password", "Times"],
+            metrics=schema_metrics,
+            cleaned_df=training_df,
         ),
     )
-    monkeypatch.setattr(
-        "training.run_pipeline.train_password_model",
-        lambda df: ("model", {"n_rows": 1}),
-    )
-    monkeypatch.setattr(
-        "training.run_pipeline.save_model_artifact",
-        lambda model, output_path: "artifacts/model.joblib",
-    )
+
+    def validate_quality(df):
+        calls.append(("model_quality", df))
+        return ModelQualityValidationResult(
+            True, [], model_quality_metrics, scored_df=scored_df
+        )
+
+    def run_evidently(df, output_path):
+        calls.append(("evidently", df, output_path))
+        return {"status": "success"}
+
+    def train(df):
+        calls.append(("train", df.copy()))
+        return "model", {"n_rows": len(df.index)}
+
+    def save(model, output_path):
+        calls.append(("save", model, output_path))
+        return "artifacts/model.joblib"
 
     def register(model, metrics, validation_report=None, model_alias=None):
-        calls.append(("register", validation_report, model_alias))
+        calls.append(("register", model, metrics, validation_report, model_alias))
+        return registration_result
+
+    def verify_alias(result):
+        calls.append(("verify_alias", result))
+
+    def reload_model(result=None):
+        calls.append(("reload", result))
+        return {"status": "model_reloaded", "token": "super-secret"}
+
+    def verify_serving(registration_result, reload_result):
+        calls.append(("verify_serving", registration_result, reload_result))
         return {
-            "model_name": "passwords",
-            "model_alias": "prod",
-            "model_version": "1",
-            "model_uri": "models:/passwords/1",
-            "alias_verified": True,
-            "verified_model_version": "1",
+            "status": "verified",
+            "loaded_model_version": registration_result["model_version"],
         }
 
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_model_quality_with_prod_model",
+        validate_quality,
+    )
+    monkeypatch.setattr("training.run_pipeline.run_evidently_tests", run_evidently)
+    monkeypatch.setattr("training.run_pipeline.train_password_model", train)
+    monkeypatch.setattr("training.run_pipeline.save_model_artifact", save)
     monkeypatch.setattr("training.run_pipeline.register_model_in_mlflow", register)
     monkeypatch.setattr(
-        "training.run_pipeline.call_reload_model_endpoint",
-        lambda registration_result=None: (
-            calls.append(("reload", registration_result))
-            or {"status": "model_reloaded", "token": "super-secret"}
-        ),
+        "training.run_pipeline._ensure_registration_alias_verified", verify_alias
     )
     monkeypatch.setattr(
-        "training.run_pipeline.verify_serving_after_reload",
-        lambda registration_result, reload_result: (
-            calls.append(("verify_serving", registration_result, reload_result))
-            or {
-                "status": "verified",
-                "loaded_model_version": registration_result["model_version"],
-            }
-        ),
+        "training.run_pipeline.call_reload_model_endpoint", reload_model
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.verify_serving_after_reload", verify_serving
     )
 
     monkeypatch.setenv("SERVICE_RELOAD_SECRET", "super-secret")
@@ -827,43 +917,39 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
     with caplog.at_level(logging.INFO):
         result = run_training_pipeline()
 
-    assert calls == [
-        (
-            "register",
-            {
-                "is_valid": True,
-                "errors": [],
-                "n_rows": 1,
-                "columns": ["Password", "Times"],
-                "schema_metrics": None,
-                "model_quality_metrics": {"rmse": 0.1},
-            },
-            "prod",
-        ),
-        (
-            "reload",
-            {
-                "model_name": "passwords",
-                "model_alias": "prod",
-                "model_version": "1",
-                "model_uri": "models:/passwords/1",
-                "alias_verified": True,
-                "verified_model_version": "1",
-            },
-        ),
-        (
-            "verify_serving",
-            {
-                "model_name": "passwords",
-                "model_alias": "prod",
-                "model_version": "1",
-                "model_uri": "models:/passwords/1",
-                "alias_verified": True,
-                "verified_model_version": "1",
-            },
-            {"status": "model_reloaded", "token": "super-secret"},
-        ),
+    assert [call[0] for call in calls] == [
+        "model_quality",
+        "evidently",
+        "train",
+        "save",
+        "register",
+        "verify_alias",
+        "reload",
+        "verify_serving",
     ]
+    assert calls[0][0] == "model_quality"
+    assert calls[0][1] is training_df
+    assert calls[1][0] == "evidently"
+    assert calls[1][1] is scored_df
+    assert calls[1][2] == "reports/tests.json"
+    assert list(calls[2][1].columns) == ["Password", "Times"]
+    assert calls[2][1].equals(training_df[["Password", "Times"]])
+    assert calls[3] == ("save", "model", "artifacts/model.joblib")
+    assert calls[4] == (
+        "register",
+        "model",
+        {"n_rows": 2},
+        merged_validation_report,
+        "prod",
+    )
+    assert calls[5] == ("verify_alias", registration_result)
+    assert calls[6] == ("reload", registration_result)
+    assert calls[7] == (
+        "verify_serving",
+        registration_result,
+        {"status": "model_reloaded", "token": "super-secret"},
+    )
+    assert result["validation_report"] == merged_validation_report
     assert result["reload"] == {"status": "model_reloaded", "token": "super-secret"}
     assert result["serving_verification"] == {
         "status": "verified",
