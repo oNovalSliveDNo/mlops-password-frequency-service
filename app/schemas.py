@@ -44,10 +44,20 @@ class TriggerResponse(BaseModel):
     message: str | None = None
 
 
+class ReloadRequest(BaseModel):
+    model_name: str | None = None
+    model_alias: str | None = None
+    expected_model_version: str | None = None
+
+
 class ReloadResponse(BaseModel):
     status: str
     model_name: str | None = None
     model_alias: str | None = None
+    requested_model_version: str | None = None
+    loaded_model_version: str | None = None
+    model_uri: str | None = None
+    reloaded_at: str | None = None
 
 
 class HealthResponse(BaseModel):

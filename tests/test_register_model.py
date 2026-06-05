@@ -102,6 +102,7 @@ def test_register_model_logs_reports_tests_json_artifact(tmp_path, monkeypatch):
         "model_alias": "prod",
         "model_version": "7",
         "alias_verified": True,
+        "model_uri": "models:/password-frequency-model/7",
         "verified_model_version": "7",
         "run_id": "run-123",
     }

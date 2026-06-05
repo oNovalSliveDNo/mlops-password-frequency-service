@@ -79,8 +79,8 @@ def test_call_reload_model_endpoint_posts_with_secret(monkeypatch):
     monkeypatch.setenv("SERVICE_RELOAD_SECRET", "super-secret")
     calls = []
 
-    def fake_post(url, headers, timeout):
-        calls.append({"url": url, "headers": headers, "timeout": timeout})
+    def fake_post(url, headers, json, timeout):
+        calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
         return FakeResponse(json_body={"status": "model_reloaded"})
 
     monkeypatch.setattr("training.run_pipeline.requests.post", fake_post)
@@ -92,6 +92,49 @@ def test_call_reload_model_endpoint_posts_with_secret(monkeypatch):
         {
             "url": "https://service.example/reload_model",
             "headers": {"X-Service-Token": "super-secret"},
+            "json": None,
+            "timeout": _RELOAD_TIMEOUT_SECONDS,
+        }
+    ]
+
+
+def test_call_reload_model_endpoint_posts_expected_model_version(monkeypatch):
+    monkeypatch.setenv("SERVICE_RELOAD_URL", "https://service.example/reload_model")
+    monkeypatch.setenv("SERVICE_RELOAD_SECRET", "super-secret")
+    calls = []
+
+    def fake_post(url, headers, json, timeout):
+        calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+        return FakeResponse(
+            json_body={
+                "status": "model_reloaded",
+                "requested_model_version": "12",
+                "loaded_model_version": "12",
+                "model_uri": "models:/passwords/12",
+                "reloaded_at": "2026-06-05T00:00:00+00:00",
+            }
+        )
+
+    monkeypatch.setattr("training.run_pipeline.requests.post", fake_post)
+
+    result = call_reload_model_endpoint(
+        {
+            "model_name": "passwords",
+            "model_alias": "prod",
+            "model_version": "12",
+        }
+    )
+
+    assert result["loaded_model_version"] == "12"
+    assert calls == [
+        {
+            "url": "https://service.example/reload_model",
+            "headers": {"X-Service-Token": "super-secret"},
+            "json": {
+                "model_name": "passwords",
+                "model_alias": "prod",
+                "expected_model_version": "12",
+            },
             "timeout": _RELOAD_TIMEOUT_SECONDS,
         }
     ]
@@ -101,7 +144,8 @@ def test_call_reload_model_endpoint_returns_status_for_non_json(monkeypatch):
     monkeypatch.setenv("SERVICE_RELOAD_URL", "https://service.example/reload_model")
     monkeypatch.setenv("SERVICE_RELOAD_SECRET", "super-secret")
 
-    def fake_post(url, headers, timeout):
+    def fake_post(url, headers, json, timeout):
+        assert json is None
         return FakeResponse(status_code=204, json_error=True)
 
     monkeypatch.setattr("training.run_pipeline.requests.post", fake_post)
@@ -115,8 +159,9 @@ def test_call_reload_model_endpoint_retries_and_sanitizes_secret(monkeypatch):
     attempts = 0
     sleeps = []
 
-    def fake_post(url, headers, timeout):
+    def fake_post(url, headers, json, timeout):
         nonlocal attempts
+        assert json is None
         attempts += 1
         raise requests.ConnectionError("network failure with super-secret")
 
@@ -169,7 +214,7 @@ def test_run_training_pipeline_stops_on_invalid_data(monkeypatch, caplog):
     )
     monkeypatch.setattr(
         "training.run_pipeline.call_reload_model_endpoint",
-        lambda: calls.append("reload"),
+        lambda *_args, **_kwargs: calls.append("reload"),
     )
 
     with caplog.at_level(logging.INFO):
@@ -345,7 +390,7 @@ def test_run_training_pipeline_does_not_reload_when_registration_fails(monkeypat
     )
     monkeypatch.setattr(
         "training.run_pipeline.call_reload_model_endpoint",
-        lambda: calls.append("reload"),
+        lambda *_args, **_kwargs: calls.append("reload"),
     )
 
     with pytest.raises(RuntimeError, match="mlflow is down"):
@@ -394,6 +439,7 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
             "model_name": "passwords",
             "model_alias": "prod",
             "model_version": "1",
+            "model_uri": "models:/passwords/1",
             "alias_verified": True,
             "verified_model_version": "1",
         }
@@ -401,8 +447,8 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
     monkeypatch.setattr("training.run_pipeline.register_model_in_mlflow", register)
     monkeypatch.setattr(
         "training.run_pipeline.call_reload_model_endpoint",
-        lambda: (
-            calls.append("reload")
+        lambda registration_result=None: (
+            calls.append(("reload", registration_result))
             or {"status": "model_reloaded", "token": "super-secret"}
         ),
     )
@@ -423,14 +469,24 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
             },
             "prod",
         ),
-        "reload",
+        (
+            "reload",
+            {
+                "model_name": "passwords",
+                "model_alias": "prod",
+                "model_version": "1",
+                "model_uri": "models:/passwords/1",
+                "alias_verified": True,
+                "verified_model_version": "1",
+            },
+        ),
     ]
     assert result["reload"] == {"status": "model_reloaded", "token": "super-secret"}
     assert "data downloaded: downloaded.csv" in caplog.text
     assert "validation passed" in caplog.text
     assert "model trained" in caplog.text
     assert (
-        "model registered: {'model_name': 'passwords', 'model_alias': 'prod', 'model_version': '1', 'alias_verified': True, 'verified_model_version': '1'}"
+        "model registered: {'model_name': 'passwords', 'model_alias': 'prod', 'model_version': '1', 'model_uri': 'models:/passwords/1', 'alias_verified': True, 'verified_model_version': '1'}"
         in caplog.text
     )
     assert (
@@ -481,6 +537,7 @@ def test_run_training_pipeline_requires_reload_url_in_ci_after_registration(
             "model_name": "passwords",
             "model_alias": model_alias,
             "model_version": "1",
+            "model_uri": "models:/passwords/1",
             "alias_verified": True,
             "verified_model_version": "1",
         },

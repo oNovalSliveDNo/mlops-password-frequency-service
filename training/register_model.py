@@ -200,6 +200,7 @@ def register_model_in_mlflow(
         "model_name": model_name,
         "model_alias": resolved_model_alias,
         "model_version": expected_version,
+        "model_uri": f"models:/{model_name}/{expected_version}",
         "alias_verified": True,
         "verified_model_version": verified_version,
         "run_id": run_id,

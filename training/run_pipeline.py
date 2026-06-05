@@ -132,7 +132,9 @@ def _ensure_registration_alias_verified(registration_result: dict[str, Any]) -> 
         )
 
 
-def call_reload_model_endpoint() -> dict[str, Any]:
+def call_reload_model_endpoint(
+    registration_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Notify the serving application to reload the production model.
 
     The endpoint URL and shared secret are read from environment variables so
@@ -164,6 +166,15 @@ def call_reload_model_endpoint() -> dict[str, Any]:
         )
 
     headers = {"X-Service-Token": reload_secret}
+    payload: dict[str, Any] | None = None
+    if registration_result is not None:
+        payload = {
+            "model_name": registration_result.get("model_name"),
+            "model_alias": registration_result.get("model_alias"),
+            "expected_model_version": registration_result.get("model_version"),
+        }
+        payload = {key: value for key, value in payload.items() if value is not None}
+
     last_error: str | None = None
 
     for attempt in range(1, _RELOAD_ATTEMPTS + 1):
@@ -171,6 +182,7 @@ def call_reload_model_endpoint() -> dict[str, Any]:
             response = requests.post(
                 reload_url,
                 headers=headers,
+                json=payload,
                 timeout=_RELOAD_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
@@ -281,7 +293,7 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
     logger.info("model registered: %s", _sanitize_for_log(registration_result))
     _ensure_registration_alias_verified(registration_result)
     logger.info("model alias verified: %s", _sanitize_for_log(registration_result))
-    reload_result = call_reload_model_endpoint()
+    reload_result = call_reload_model_endpoint(registration_result)
     logger.info("service reloaded: %s", _sanitize_for_log(reload_result))
 
     return {

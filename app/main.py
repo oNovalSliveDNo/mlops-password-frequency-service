@@ -8,6 +8,7 @@ from app.schemas import (
     HealthResponse,
     PredictRequest,
     PredictResponse,
+    ReloadRequest,
     ReloadResponse,
     TriggerRequest,
     TriggerResponse,
@@ -75,6 +76,7 @@ def trigger(request: TriggerRequest, response: Response) -> TriggerResponse:
 
 @app.post("/reload_model", response_model=ReloadResponse)
 def reload_model_endpoint(
+    request: ReloadRequest | None = None,
     x_service_token: str | None = Header(default=None, alias="X-Service-Token"),
 ) -> ReloadResponse:
     expected_token = os.getenv("SERVICE_RELOAD_SECRET")
@@ -90,8 +92,32 @@ def reload_model_endpoint(
             detail="Missing or invalid service token",
         )
 
+    model_name = os.getenv("MODEL_NAME")
+    model_alias = os.getenv("MODEL_ALIAS", "prod")
+    if request is not None:
+        if request.model_name is not None and request.model_name != model_name:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Requested model_name does not match service configuration: "
+                    f"{request.model_name!r} != {model_name!r}"
+                ),
+            )
+        if request.model_alias is not None and request.model_alias != model_alias:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Requested model_alias does not match service configuration: "
+                    f"{request.model_alias!r} != {model_alias!r}"
+                ),
+            )
+
+    expected_model_version = (
+        request.expected_model_version if request is not None else None
+    )
+
     try:
-        reload_model()
+        load_metadata = reload_model(expected_model_version=expected_model_version)
     except RuntimeError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -105,6 +131,10 @@ def reload_model_endpoint(
 
     return ReloadResponse(
         status="model_reloaded",
-        model_name=os.getenv("MODEL_NAME"),
-        model_alias=os.getenv("MODEL_ALIAS", "prod"),
+        model_name=load_metadata.model_name,
+        model_alias=load_metadata.model_alias,
+        requested_model_version=load_metadata.requested_model_version,
+        loaded_model_version=load_metadata.loaded_model_version,
+        model_uri=load_metadata.model_uri,
+        reloaded_at=load_metadata.reloaded_at,
     )
