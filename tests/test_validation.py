@@ -189,3 +189,33 @@ def test_validate_data_file_writes_read_error_report(tmp_path):
     assert '"errors": [' in report_text
     assert '"n_rows": 0' in report_text
     assert '"columns": []' in report_text
+
+
+def test_large_balanced_target_distribution_is_valid():
+    df = pd.DataFrame(
+        {
+            "Password": [f"password_{i}" for i in range(100)],
+            "Times": [0.0] * 50 + [1.0] * 50,
+        }
+    )
+
+    is_valid, errors, cleaned_df = validate_password_dataframe(df)
+
+    assert is_valid is True
+    assert errors == []
+    assert cleaned_df is not None
+
+
+def test_large_imbalanced_target_distribution_is_invalid():
+    df = pd.DataFrame(
+        {
+            "Password": [f"password_{i}" for i in range(100)],
+            "Times": [0.0] * 80 + [1.0] * 20,
+        }
+    )
+
+    is_valid, errors, cleaned_df = validate_password_dataframe(df)
+
+    assert is_valid is False
+    assert cleaned_df is None
+    assert any("invalid target distribution" in error for error in errors)

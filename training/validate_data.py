@@ -4,7 +4,6 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-
 import numpy as np
 import pandas as pd
 from evidently.test_suite import TestSuite
@@ -15,6 +14,9 @@ from evidently.tests import (
     TestNumberOfRows,
     TestShareOfMissingValues,
 )
+
+_MIN_DISTRIBUTION_CHECK_ROWS = 5
+_MIN_POSITIVE_TARGET_SHARE = 0.30
 
 
 @dataclass(frozen=True)
@@ -66,9 +68,9 @@ def validate_password_dataframe(
 ) -> tuple[bool, list[str], pd.DataFrame | None]:
     """Validate and clean password-frequency training data.
 
-    The expected input contains password strings in ``Password`` and positive
-    numeric frequencies in ``Times``. On success, a cleaned dataframe with only
-    these two columns is returned.
+    The expected input contains password strings in ``Password`` and
+    non-negative numeric target values in ``Times``. On success, a cleaned
+    dataframe with only these two columns is returned.
     """
     errors: list[str] = []
 
@@ -131,7 +133,6 @@ def validate_password_dataframe(
     if invalid_times.any():
         errors.append("Column Times contains non-numeric values")
 
-    # Дальше проверяем только числовые (не NaN) значения
     valid_times_mask = ~cleaned_df["Times"].isna()
     if valid_times_mask.any():
         finite_times = np.isfinite(
@@ -143,6 +144,16 @@ def validate_password_dataframe(
         non_negative_times = cleaned_df.loc[valid_times_mask, "Times"] >= 0
         if not non_negative_times.all():
             errors.append("Column Times must contain only non-negative values")
+
+    if not errors and len(cleaned_df.index) >= _MIN_DISTRIBUTION_CHECK_ROWS:
+        positive_share = float((cleaned_df["Times"] > 0).mean())
+
+        if positive_share < _MIN_POSITIVE_TARGET_SHARE:
+            errors.append(
+                "Column Times has invalid target distribution: "
+                f"positive share is {positive_share:.3f}; expected at least "
+                f"{_MIN_POSITIVE_TARGET_SHARE:.2f}"
+            )
 
     if errors:
         return False, errors, None
