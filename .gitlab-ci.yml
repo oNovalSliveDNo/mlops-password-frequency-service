@@ -102,20 +102,14 @@ build:
 # =========================
 deploy:
   stage: deploy
-  image: python:3.11-slim
+  image: alpine:3.20
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "push" && $RENDER_DEPLOY_HOOK'
+    - if: '$CI_PIPELINE_SOURCE == "push"'
   needs:
     - build
-  before_script:
-    # Устанавливаем curl, так как в slim-образах его может не быть
-    - apt-get update && apt-get install -y curl
   script:
-    - echo "Triggering Render deploy..."
-    # --retry 10: делать до 10 попыток при сетевых сбоях
-    # --retry-delay 5: ждать 5 секунд между попытками
-    # -f: возвращать код ошибки, если HTTP-статус >= 400
-    - curl -k -f -X POST --retry 10 --retry-delay 5 "$RENDER_DEPLOY_HOOK"
+    - echo "Docker image was pushed to DockerHub."
+    - echo "Render deployment is triggered by DockerHub webhook or can be run manually."
 
 # =========================
 # TRAIN: triggered from FastAPI /trigger
