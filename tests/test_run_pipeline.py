@@ -528,6 +528,161 @@ def test_main_does_not_train_or_register_on_bad_downloaded_data(tmp_path, monkey
     assert validation_report["n_rows"] == 0
 
 
+def test_run_training_pipeline_uses_scored_df_for_evidently_after_validation(
+    monkeypatch,
+):
+    from training.run_pipeline import run_training_pipeline
+
+    training_df = FakeTrainingFrame()
+    scored_df = object()
+    calls = []
+
+    monkeypatch.setenv("DATA_URL", "https://example.com/data.csv")
+    monkeypatch.setattr(
+        "training.run_pipeline.download_data",
+        lambda data_url, output_path: "downloaded.csv",
+    )
+    monkeypatch.setattr("training.run_pipeline.read_csv", lambda path: object())
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_data_file",
+        lambda input_path, report_path: ValidationResult(
+            True, [], 1, ["Password", "Times"]
+        ),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_password_dataframe",
+        lambda df: (True, [], training_df, None),
+    )
+
+    def validate_quality(df):
+        calls.append(("model_quality", df))
+        return SimpleNamespace(
+            is_valid=True,
+            errors=[],
+            metrics={"rmse": 0.1},
+            scored_df=scored_df,
+        )
+
+    def run_evidently(df, output_path):
+        calls.append(("evidently", df, output_path))
+        return {"status": "failure"}
+
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_model_quality_with_prod_model",
+        validate_quality,
+    )
+    monkeypatch.setattr("training.run_pipeline.run_evidently_tests", run_evidently)
+    monkeypatch.setattr(
+        "training.run_pipeline.train_password_model",
+        lambda df: calls.append(("train", df)) or ("model", {"n_rows": 1}),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.save_model_artifact",
+        lambda model, output_path: "artifacts/model.joblib",
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.register_model_in_mlflow",
+        lambda model, metrics, validation_report=None, model_alias=None: {
+            "model_name": "passwords",
+            "model_alias": model_alias,
+            "model_version": "1",
+            "alias_verified": True,
+            "verified_model_version": "1",
+        },
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.call_reload_model_endpoint",
+        lambda registration_result=None: {"status": "skipped"},
+    )
+
+    result = run_training_pipeline()
+
+    assert result["evidently_report"] == {"status": "failure"}
+    assert calls[:3] == [
+        ("model_quality", training_df),
+        ("evidently", scored_df, "reports/tests.json"),
+        ("train", training_df),
+    ]
+
+
+def test_run_training_pipeline_continues_when_evidently_raises(
+    tmp_path, monkeypatch, caplog
+):
+    from training.run_pipeline import run_training_pipeline
+
+    reports_path = tmp_path / "tests.json"
+    training_df = FakeTrainingFrame()
+    calls = []
+
+    monkeypatch.setenv("DATA_URL", "https://example.com/data.csv")
+    monkeypatch.setattr(
+        "training.run_pipeline._DEFAULT_EVIDENTLY_REPORT_PATH", str(reports_path)
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.download_data",
+        lambda data_url, output_path: "downloaded.csv",
+    )
+    monkeypatch.setattr("training.run_pipeline.read_csv", lambda path: object())
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_data_file",
+        lambda input_path, report_path: ValidationResult(
+            True, [], 1, ["Password", "Times"]
+        ),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_password_dataframe",
+        lambda df: (True, [], training_df, None),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_model_quality_with_prod_model",
+        lambda df: SimpleNamespace(
+            is_valid=True,
+            errors=[],
+            metrics={"rmse": 0.1},
+            scored_df=None,
+        ),
+    )
+
+    def fail_evidently(df, output_path):
+        raise RuntimeError("evidently backend unavailable")
+
+    monkeypatch.setattr("training.run_pipeline.run_evidently_tests", fail_evidently)
+    monkeypatch.setattr(
+        "training.run_pipeline.train_password_model",
+        lambda df: calls.append("train") or ("model", {"n_rows": 1}),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.save_model_artifact",
+        lambda model, output_path: "artifacts/model.joblib",
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.register_model_in_mlflow",
+        lambda model, metrics, validation_report=None, model_alias=None: {
+            "model_name": "passwords",
+            "model_alias": model_alias,
+            "model_version": "1",
+            "alias_verified": True,
+            "verified_model_version": "1",
+        },
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.call_reload_model_endpoint",
+        lambda registration_result=None: {"status": "skipped"},
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = run_training_pipeline()
+
+    assert calls == ["train"]
+    assert result["evidently_report"]["status"] == "warning"
+    assert result["evidently_report"]["evidently_failed"] is True
+    assert (
+        json.loads(reports_path.read_text(encoding="utf-8"))
+        == result["evidently_report"]
+    )
+    assert "continuing pipeline" in caplog.text
+
+
 def test_run_training_pipeline_does_not_reload_when_registration_fails(monkeypatch):
     from training.run_pipeline import run_training_pipeline
 

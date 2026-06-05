@@ -425,6 +425,36 @@ def _write_validation_report(report: dict[str, Any], report_path: str) -> None:
     )
 
 
+def _write_evidently_warning_report(
+    error: Exception, output_path: str
+) -> dict[str, Any]:
+    report = {
+        "status": "warning",
+        "warning": f"Evidently tests failed to run: {error}",
+        "evidently_failed": True,
+    }
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return report
+
+
+def _run_non_blocking_evidently_tests(
+    df, output_path: str = _DEFAULT_EVIDENTLY_REPORT_PATH
+) -> dict[str, Any]:
+    """Run Evidently after validation gates without making its status blocking."""
+    try:
+        return run_evidently_tests(df, output_path)
+    except Exception as exc:
+        logger.warning(
+            "Evidently tests failed after validation gates; continuing pipeline: %s",
+            _sanitize_for_log(str(exc)),
+        )
+        return _write_evidently_warning_report(exc, output_path)
+
+
 def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
     """Run the training orchestration from download through service reload.
 
@@ -489,12 +519,10 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
             "errors": errors,
         }
 
-    evidently_input_df = (
-        model_quality_result.scored_df
-        if model_quality_result.scored_df is not None
-        else training_df
-    )
-    evidently_report = run_evidently_tests(
+    evidently_input_df = getattr(model_quality_result, "scored_df", None)
+    if evidently_input_df is None:
+        evidently_input_df = training_df
+    evidently_report = _run_non_blocking_evidently_tests(
         evidently_input_df, _DEFAULT_EVIDENTLY_REPORT_PATH
     )
     model, metrics = train_password_model(training_df[["Password", "Times"]])
