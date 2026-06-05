@@ -3,7 +3,7 @@ import os
 from fastapi import FastAPI, Header, HTTPException, Response, status
 
 from app.gitlab_trigger import trigger_training_pipeline
-from app.model_loader import is_model_loaded, predict_passwords, reload_model
+from app.model_loader import get_model_state, predict_passwords, reload_model
 from app.schemas import (
     HealthResponse,
     PredictRequest,
@@ -19,7 +19,18 @@ app = FastAPI(title="Password Frequency Service")
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    return HealthResponse(status="ok", model_loaded=is_model_loaded())
+    model_state = get_model_state()
+    return HealthResponse(
+        status="ok",
+        model_loaded=model_state.model_loaded,
+        model_name=model_state.model_name,
+        model_alias=model_state.model_alias,
+        loaded_version=model_state.loaded_version,
+        model_uri=model_state.model_uri,
+        loaded_at=model_state.loaded_at,
+        last_reload_status=model_state.last_reload_status,
+        last_reload_error=model_state.last_reload_error,
+    )
 
 
 @app.post("/predict", response_model=PredictResponse)

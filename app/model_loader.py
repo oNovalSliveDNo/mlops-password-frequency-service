@@ -7,6 +7,8 @@ from mlflow.tracking import MlflowClient
 
 _model = None
 _model_metadata: "ModelLoadMetadata | None" = None
+_last_reload_status = "not_loaded"
+_last_reload_error: str | None = None
 _model_lock = threading.Lock()
 
 
@@ -18,6 +20,18 @@ class ModelLoadMetadata:
     loaded_model_version: str | None
     model_uri: str
     reloaded_at: str
+
+
+@dataclass(frozen=True)
+class ModelServiceState:
+    model_loaded: bool
+    model_name: str | None
+    model_alias: str | None
+    loaded_version: str | None
+    model_uri: str | None
+    loaded_at: str | None
+    last_reload_status: str
+    last_reload_error: str | None
 
 
 def _get_model_name() -> str:
@@ -90,30 +104,78 @@ def load_model_from_mlflow(
 
 
 def get_model():
-    global _model, _model_metadata
+    global _last_reload_error, _last_reload_status, _model, _model_metadata
 
     with _model_lock:
         if _model is not None:
             return _model
 
-        _model, _model_metadata = load_model_from_mlflow()
+        try:
+            _model, _model_metadata = load_model_from_mlflow()
+        except Exception as exc:
+            _last_reload_status = "failed"
+            _last_reload_error = str(exc)
+            raise
+
+        _last_reload_status = "success"
+        _last_reload_error = None
         return _model
 
 
 def reload_model(expected_model_version: str | None = None) -> ModelLoadMetadata:
-    global _model, _model_metadata
+    global _last_reload_error, _last_reload_status, _model, _model_metadata
 
     with _model_lock:
-        _model, _model_metadata = load_model_from_mlflow(expected_model_version)
+        try:
+            loaded_model, loaded_metadata = load_model_from_mlflow(
+                expected_model_version
+            )
+        except Exception as exc:
+            _last_reload_status = "failed"
+            _last_reload_error = str(exc)
+            raise
+
+        _model = loaded_model
+        _model_metadata = loaded_metadata
+        _last_reload_status = "success"
+        _last_reload_error = None
         return _model_metadata
 
 
 def get_model_metadata() -> ModelLoadMetadata | None:
-    return _model_metadata
+    with _model_lock:
+        return _model_metadata
+
+
+def get_model_state() -> ModelServiceState:
+    with _model_lock:
+        return ModelServiceState(
+            model_loaded=_model is not None,
+            model_name=_model_metadata.model_name
+            if _model_metadata is not None
+            else None,
+            model_alias=_model_metadata.model_alias
+            if _model_metadata is not None
+            else None,
+            loaded_version=(
+                _model_metadata.loaded_model_version
+                if _model_metadata is not None
+                else None
+            ),
+            model_uri=_model_metadata.model_uri
+            if _model_metadata is not None
+            else None,
+            loaded_at=_model_metadata.reloaded_at
+            if _model_metadata is not None
+            else None,
+            last_reload_status=_last_reload_status,
+            last_reload_error=_last_reload_error,
+        )
 
 
 def is_model_loaded() -> bool:
-    return _model is not None
+    with _model_lock:
+        return _model is not None
 
 
 def predict_passwords(passwords: list[str]) -> list[float]:
@@ -133,8 +195,10 @@ def predict_passwords(passwords: list[str]) -> list[float]:
 
 
 def set_model_for_tests(model):
-    global _model, _model_metadata
+    global _last_reload_error, _last_reload_status, _model, _model_metadata
 
     with _model_lock:
         _model = model
         _model_metadata = None
+        _last_reload_status = "success" if model is not None else "not_loaded"
+        _last_reload_error = None

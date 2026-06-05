@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
 import app.main as main
-from app.model_loader import ModelLoadMetadata
+from app.model_loader import ModelLoadMetadata, ModelServiceState
 
 
 client = TestClient(main.app)
@@ -111,3 +111,35 @@ def test_reload_model_without_secret_header(monkeypatch):
     response = client.post("/reload_model")
 
     assert response.status_code == 401
+
+
+def test_health_includes_model_diagnostics(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "get_model_state",
+        lambda: ModelServiceState(
+            model_loaded=True,
+            model_name="passwords",
+            model_alias="prod",
+            loaded_version="11",
+            model_uri="models:/passwords@prod",
+            loaded_at="2026-06-05T00:00:00+00:00",
+            last_reload_status="success",
+            last_reload_error=None,
+        ),
+    )
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "model_loaded": True,
+        "model_name": "passwords",
+        "model_alias": "prod",
+        "loaded_version": "11",
+        "model_uri": "models:/passwords@prod",
+        "loaded_at": "2026-06-05T00:00:00+00:00",
+        "last_reload_status": "success",
+        "last_reload_error": None,
+    }

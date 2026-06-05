@@ -63,3 +63,10 @@ class ReloadResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     model_loaded: bool
+    model_name: str | None = None
+    model_alias: str | None = None
+    loaded_version: str | None = None
+    model_uri: str | None = None
+    loaded_at: str | None = None
+    last_reload_status: str
+    last_reload_error: str | None = None
