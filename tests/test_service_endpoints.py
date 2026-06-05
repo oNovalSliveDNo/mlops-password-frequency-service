@@ -143,3 +143,27 @@ def test_health_includes_model_diagnostics(monkeypatch):
         "last_reload_status": "success",
         "last_reload_error": None,
     }
+
+
+def test_model_state_matches_health_diagnostics(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "get_model_state",
+        lambda: ModelServiceState(
+            model_loaded=True,
+            model_name="passwords",
+            model_alias="prod",
+            loaded_version="12",
+            model_uri="models:/passwords/12",
+            loaded_at="2026-06-05T00:00:00+00:00",
+            last_reload_status="success",
+            last_reload_error=None,
+        ),
+    )
+
+    response = client.get("/model_state")
+
+    assert response.status_code == 200
+    assert response.json()["model_loaded"] is True
+    assert response.json()["loaded_version"] == "12"
+    assert response.json()["last_reload_status"] == "success"

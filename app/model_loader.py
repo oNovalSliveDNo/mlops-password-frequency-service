@@ -122,6 +122,17 @@ def get_model():
         return _model
 
 
+def _ensure_expected_version_loaded(metadata: ModelLoadMetadata) -> None:
+    if (
+        metadata.requested_model_version is not None
+        and metadata.loaded_model_version != metadata.requested_model_version
+    ):
+        raise RuntimeError(
+            "Loaded model version does not match requested version: "
+            f"{metadata.loaded_model_version!r} != {metadata.requested_model_version!r}"
+        )
+
+
 def reload_model(expected_model_version: str | None = None) -> ModelLoadMetadata:
     global _last_reload_error, _last_reload_status, _model, _model_metadata
 
@@ -134,6 +145,8 @@ def reload_model(expected_model_version: str | None = None) -> ModelLoadMetadata
             _last_reload_status = "failed"
             _last_reload_error = str(exc)
             raise
+
+        _ensure_expected_version_loaded(loaded_metadata)
 
         _model = loaded_model
         _model_metadata = loaded_metadata

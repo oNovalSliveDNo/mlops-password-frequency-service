@@ -17,8 +17,7 @@ from app.schemas import (
 app = FastAPI(title="Password Frequency Service")
 
 
-@app.get("/health", response_model=HealthResponse)
-def health() -> HealthResponse:
+def _current_health_response() -> HealthResponse:
     model_state = get_model_state()
     return HealthResponse(
         status="ok",
@@ -31,6 +30,17 @@ def health() -> HealthResponse:
         last_reload_status=model_state.last_reload_status,
         last_reload_error=model_state.last_reload_error,
     )
+
+
+@app.get("/health", response_model=HealthResponse)
+def health() -> HealthResponse:
+    return _current_health_response()
+
+
+@app.get("/model_state", response_model=HealthResponse)
+def model_state() -> HealthResponse:
+    """Expose the loaded model metadata for post-reload serving checks."""
+    return _current_health_response()
 
 
 @app.post("/predict", response_model=PredictResponse)

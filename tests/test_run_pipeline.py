@@ -8,7 +8,10 @@ from training.run_pipeline import (
     _RELOAD_RETRY_DELAY_SECONDS,
     _RELOAD_TIMEOUT_SECONDS,
 )
-from training.run_pipeline import call_reload_model_endpoint
+from training.run_pipeline import (
+    call_reload_model_endpoint,
+    verify_serving_after_reload,
+)
 
 
 @dataclass(frozen=True)
@@ -176,6 +179,90 @@ def test_call_reload_model_endpoint_retries_and_sanitizes_secret(monkeypatch):
     assert sleeps == [_RELOAD_RETRY_DELAY_SECONDS, _RELOAD_RETRY_DELAY_SECONDS]
     assert "ConnectionError" in error_message
     assert "super-secret" not in error_message
+
+
+def test_verify_serving_after_reload_checks_health_and_predict(monkeypatch):
+    monkeypatch.setenv("SERVICE_RELOAD_URL", "https://service.example/reload_model")
+    monkeypatch.setenv("SERVICE_PREDICT_SMOKE_PASSWORDS", "alpha,beta")
+    calls = []
+
+    def fake_request(method, url, timeout, **kwargs):
+        calls.append(
+            {"method": method, "url": url, "timeout": timeout, "kwargs": kwargs}
+        )
+        if method == "GET":
+            return FakeResponse(
+                json_body={
+                    "status": "ok",
+                    "model_loaded": True,
+                    "model_name": "passwords",
+                    "model_alias": "prod",
+                    "loaded_version": "12",
+                    "model_uri": "models:/passwords/12",
+                    "loaded_at": "2026-06-05T00:00:00+00:00",
+                    "last_reload_status": "success",
+                    "last_reload_error": None,
+                }
+            )
+
+        return FakeResponse(json_body={"Times": [1.0, 2.0]})
+
+    monkeypatch.setattr(
+        "training.run_pipeline.requests.request", fake_request, raising=False
+    )
+
+    result = verify_serving_after_reload(
+        {"model_name": "passwords", "model_alias": "prod", "model_version": "12"},
+        {"status": "model_reloaded", "loaded_model_version": "12"},
+    )
+
+    assert result["status"] == "verified"
+    assert result["expected_model_version"] == "12"
+    assert result["loaded_model_version"] == "12"
+    assert result["predict"] == {
+        "url": "https://service.example/predict",
+        "request_count": 2,
+        "response_count": 2,
+    }
+    assert calls == [
+        {
+            "method": "GET",
+            "url": "https://service.example/health",
+            "timeout": 30,
+            "kwargs": {},
+        },
+        {
+            "method": "POST",
+            "url": "https://service.example/predict",
+            "timeout": 30,
+            "kwargs": {"json": {"Password": ["alpha", "beta"]}},
+        },
+    ]
+
+
+def test_verify_serving_after_reload_rejects_stale_loaded_version(monkeypatch):
+    monkeypatch.setenv("SERVICE_HEALTH_URL", "https://service.example/health")
+    monkeypatch.setenv("SERVICE_PREDICT_URL", "https://service.example/predict")
+
+    def fake_request(method, url, timeout, **kwargs):
+        assert method == "GET"
+        return FakeResponse(
+            json_body={
+                "status": "ok",
+                "model_loaded": True,
+                "loaded_version": "11",
+                "last_reload_status": "success",
+            }
+        )
+
+    monkeypatch.setattr(
+        "training.run_pipeline.requests.request", fake_request, raising=False
+    )
+    with pytest.raises(RuntimeError, match="unexpected model version"):
+        verify_serving_after_reload(
+            {"model_name": "passwords", "model_alias": "prod", "model_version": "12"},
+            {"status": "model_reloaded"},
+        )
 
 
 def test_run_training_pipeline_stops_on_invalid_data(monkeypatch, caplog):
@@ -452,6 +539,16 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
             or {"status": "model_reloaded", "token": "super-secret"}
         ),
     )
+    monkeypatch.setattr(
+        "training.run_pipeline.verify_serving_after_reload",
+        lambda registration_result, reload_result: (
+            calls.append(("verify_serving", registration_result, reload_result))
+            or {
+                "status": "verified",
+                "loaded_model_version": registration_result["model_version"],
+            }
+        ),
+    )
 
     monkeypatch.setenv("SERVICE_RELOAD_SECRET", "super-secret")
 
@@ -480,8 +577,24 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
                 "verified_model_version": "1",
             },
         ),
+        (
+            "verify_serving",
+            {
+                "model_name": "passwords",
+                "model_alias": "prod",
+                "model_version": "1",
+                "model_uri": "models:/passwords/1",
+                "alias_verified": True,
+                "verified_model_version": "1",
+            },
+            {"status": "model_reloaded", "token": "super-secret"},
+        ),
     ]
     assert result["reload"] == {"status": "model_reloaded", "token": "super-secret"}
+    assert result["serving_verification"] == {
+        "status": "verified",
+        "loaded_model_version": "1",
+    }
     assert "data downloaded: downloaded.csv" in caplog.text
     assert "validation passed" in caplog.text
     assert "model trained" in caplog.text
@@ -490,7 +603,7 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
         in caplog.text
     )
     assert (
-        "service reloaded: {'status': 'model_reloaded', 'token': '[REDACTED]'}"
+        "service reload response received: {'status': 'model_reloaded', 'token': '[REDACTED]'}"
         in caplog.text
     )
     assert "super-secret" not in caplog.text

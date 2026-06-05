@@ -3,6 +3,7 @@ import os
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import requests
 
@@ -10,6 +11,8 @@ import requests
 _RELOAD_ATTEMPTS = 3
 _RELOAD_RETRY_DELAY_SECONDS = 10
 _RELOAD_TIMEOUT_SECONDS = 120
+_SERVING_CHECK_TIMEOUT_SECONDS = 30
+_DEFAULT_PREDICT_SMOKE_PASSWORDS = ("password", "correcthorsebatterystaple")
 _DEFAULT_DATA_PATH = "artifacts/new_data.csv"
 _DEFAULT_MODEL_ARTIFACT_PATH = "artifacts/model.joblib"
 _DEFAULT_VALIDATION_REPORT_PATH = "validation_reports/validation_report.json"
@@ -130,6 +133,162 @@ def _ensure_registration_alias_verified(registration_result: dict[str, Any]) -> 
             f"{registration_result.get('model_alias')!r} points to model version "
             f"{model_version!r}; refusing to reload service."
         )
+
+
+def _service_endpoint_url(explicit_env_name: str, fallback_path: str) -> str | None:
+    """Resolve a serving endpoint URL from env or from SERVICE_RELOAD_URL."""
+    explicit_url = os.getenv(explicit_env_name)
+    if explicit_url:
+        return explicit_url
+
+    reload_url = os.getenv("SERVICE_RELOAD_URL")
+    if not reload_url:
+        return None
+
+    parsed_url = urlparse(reload_url)
+    if not parsed_url.scheme or not parsed_url.netloc:
+        return urljoin(reload_url.rstrip("/") + "/", fallback_path.lstrip("/"))
+
+    return urlunparse(
+        (
+            parsed_url.scheme,
+            parsed_url.netloc,
+            fallback_path,
+            "",
+            "",
+            "",
+        )
+    )
+
+
+def _expected_model_version(registration_result: dict[str, Any] | None) -> str | None:
+    if registration_result is None:
+        return None
+
+    model_version = registration_result.get("model_version")
+    if model_version is None:
+        return None
+
+    return str(model_version)
+
+
+def _parse_predict_smoke_passwords() -> list[str]:
+    raw_passwords = os.getenv("SERVICE_PREDICT_SMOKE_PASSWORDS")
+    if raw_passwords is None:
+        return list(_DEFAULT_PREDICT_SMOKE_PASSWORDS)
+
+    passwords = [password.strip() for password in raw_passwords.split(",")]
+    return [password for password in passwords if password]
+
+
+def _request_json_with_retries(method: str, url: str, **kwargs) -> dict[str, Any]:
+    last_error: str | None = None
+
+    for attempt in range(1, _RELOAD_ATTEMPTS + 1):
+        try:
+            response = requests.request(
+                method,
+                url,
+                timeout=_SERVING_CHECK_TIMEOUT_SECONDS,
+                **kwargs,
+            )
+            response.raise_for_status()
+            try:
+                body = response.json()
+            except ValueError as exc:
+                raise RuntimeError(f"{url} returned a non-JSON response") from exc
+
+            if not isinstance(body, dict):
+                raise RuntimeError(f"{url} returned a non-object JSON response")
+
+            return body
+        except (requests.RequestException, RuntimeError) as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            sanitized_error = _sanitize_for_log(str(exc))
+            if status_code is None:
+                last_error = type(exc).__name__
+                if sanitized_error:
+                    last_error = f"{last_error}: {sanitized_error}"
+            else:
+                last_error = f"{type(exc).__name__} with HTTP status {status_code}"
+
+            if attempt < _RELOAD_ATTEMPTS:
+                time.sleep(_RELOAD_RETRY_DELAY_SECONDS)
+
+    raise RuntimeError(
+        f"Serving check {method} {url} failed after {_RELOAD_ATTEMPTS} attempts. "
+        f"Last error: {_sanitize_for_log(last_error)}."
+    )
+
+
+def verify_serving_after_reload(
+    registration_result: dict[str, Any] | None,
+    reload_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Verify that the serving app exposes the reloaded model and predicts."""
+    if reload_result.get("status") == "skipped":
+        return {
+            "status": "skipped",
+            "reason": "service reload was skipped",
+        }
+
+    expected_version = _expected_model_version(registration_result)
+    health_url = _service_endpoint_url("SERVICE_HEALTH_URL", "/health")
+    predict_url = _service_endpoint_url("SERVICE_PREDICT_URL", "/predict")
+    if not health_url or not predict_url:
+        raise RuntimeError(
+            "SERVICE_HEALTH_URL and SERVICE_PREDICT_URL are required for serving "
+            "verification when SERVICE_RELOAD_URL cannot be used to derive them."
+        )
+
+    health_state = _request_json_with_retries("GET", health_url)
+    if health_state.get("model_loaded") is not True:
+        raise RuntimeError(
+            f"Serving health check reports model_loaded={health_state.get('model_loaded')!r}."
+        )
+    if health_state.get("last_reload_status") != "success":
+        raise RuntimeError(
+            "Serving health check reports last_reload_status="
+            f"{health_state.get('last_reload_status')!r}."
+        )
+    if (
+        expected_version is not None
+        and health_state.get("loaded_version") != expected_version
+    ):
+        raise RuntimeError(
+            "Serving health check loaded unexpected model version: "
+            f"{health_state.get('loaded_version')!r} != {expected_version!r}."
+        )
+
+    smoke_passwords = _parse_predict_smoke_passwords()
+    if not smoke_passwords:
+        raise RuntimeError(
+            "SERVICE_PREDICT_SMOKE_PASSWORDS did not contain any passwords."
+        )
+
+    predict_result = _request_json_with_retries(
+        "POST",
+        predict_url,
+        json={"Password": smoke_passwords},
+    )
+    predictions = predict_result.get("Times")
+    if not isinstance(predictions, list) or len(predictions) != len(smoke_passwords):
+        raise RuntimeError(
+            "Serving predict smoke check returned invalid Times: "
+            f"{_sanitize_for_log(predictions)!r}."
+        )
+
+    return {
+        "status": "verified",
+        "expected_model_version": expected_version,
+        "loaded_model_version": health_state.get("loaded_version"),
+        "health": health_state,
+        "predict": {
+            "url": predict_url,
+            "request_count": len(smoke_passwords),
+            "response_count": len(predictions),
+        },
+    }
 
 
 def call_reload_model_endpoint(
@@ -294,7 +453,17 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
     _ensure_registration_alias_verified(registration_result)
     logger.info("model alias verified: %s", _sanitize_for_log(registration_result))
     reload_result = call_reload_model_endpoint(registration_result)
-    logger.info("service reloaded: %s", _sanitize_for_log(reload_result))
+    logger.info(
+        "service reload response received: %s", _sanitize_for_log(reload_result)
+    )
+    serving_verification = verify_serving_after_reload(
+        registration_result, reload_result
+    )
+    logger.info("service state checked: %s", _sanitize_for_log(serving_verification))
+    logger.info(
+        "service loaded model version: %s",
+        _sanitize_for_log(serving_verification.get("loaded_model_version")),
+    )
 
     return {
         "data_path": data_path,
@@ -303,6 +472,7 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
         "model_artifact_path": model_artifact_path,
         "registration": registration_result,
         "reload": reload_result,
+        "serving_verification": serving_verification,
     }
 
 
