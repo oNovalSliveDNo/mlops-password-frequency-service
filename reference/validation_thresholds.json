@@ -1,0 +1,13 @@
+{
+  "schema": {
+    "min_positive_target_share": 0.30,
+    "max_positive_target_share": 0.70,
+    "max_password_length": 128
+  },
+  "model_quality": {
+    "max_rmse": 0.23,
+    "max_mae": 0.18,
+    "max_abs_mean_error": 0.09,
+    "max_prediction_target_mean_gap": 0.10
+  }
+}

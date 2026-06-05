@@ -17,9 +17,19 @@ from evidently.tests import (
     TestShareOfMissingValues,
 )
 
-_MIN_POSITIVE_TARGET_SHARE = 0.30
-_MAX_POSITIVE_TARGET_SHARE = 0.70
-_DEFAULT_MAX_PASSWORD_LENGTH = 128
+
+from training.validation_thresholds import (
+    DEFAULT_SCHEMA_THRESHOLDS,
+    load_validation_thresholds,
+)
+
+_MIN_POSITIVE_TARGET_SHARE = float(
+    DEFAULT_SCHEMA_THRESHOLDS["min_positive_target_share"]
+)
+_MAX_POSITIVE_TARGET_SHARE = float(
+    DEFAULT_SCHEMA_THRESHOLDS["max_positive_target_share"]
+)
+_DEFAULT_MAX_PASSWORD_LENGTH = int(DEFAULT_SCHEMA_THRESHOLDS["max_password_length"])
 _REQUIRED_COLUMNS = ["Password", "Times"]
 _PASSWORD_PATTERN = re.compile(r"^[a-z]+$")
 _ALLOWED_TIMES_VALUES = {0.0, 1.0}
@@ -91,9 +101,9 @@ def _build_validation_metrics(cleaned_df: pd.DataFrame) -> dict[str, Any]:
 def validate_password_dataframe(
     df: pd.DataFrame,
     *,
-    max_password_length: int = _DEFAULT_MAX_PASSWORD_LENGTH,
-    min_positive_target_share: float = _MIN_POSITIVE_TARGET_SHARE,
-    max_positive_target_share: float = _MAX_POSITIVE_TARGET_SHARE,
+    max_password_length: int | None = None,
+    min_positive_target_share: float | None = None,
+    max_positive_target_share: float | None = None,
 ) -> tuple[bool, list[str], pd.DataFrame | None, dict[str, Any] | None]:
     """Validate and clean password-frequency training data.
 
@@ -102,6 +112,18 @@ def validate_password_dataframe(
     cleaned dataframe with only these two columns and validation metrics are
     returned.
     """
+    schema_thresholds = load_validation_thresholds()["schema"]
+    if max_password_length is None:
+        max_password_length = int(schema_thresholds["max_password_length"])
+    if min_positive_target_share is None:
+        min_positive_target_share = float(
+            schema_thresholds["min_positive_target_share"]
+        )
+    if max_positive_target_share is None:
+        max_positive_target_share = float(
+            schema_thresholds["max_positive_target_share"]
+        )
+
     errors: list[str] = []
 
     if len(df.index) == 0:

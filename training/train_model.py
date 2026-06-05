@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
 from sklearn.linear_model import Ridge
-from sklearn.metrics import root_mean_squared_error
+from sklearn.metrics import mean_absolute_error, root_mean_squared_error
 from sklearn.pipeline import FeatureUnion, Pipeline
 
 from training.entropy import TextEntropyTransformer
@@ -48,9 +48,18 @@ def train_password_model(df: pd.DataFrame) -> tuple[Pipeline, dict]:
     pipeline.fit(passwords, target)
     predictions = pipeline.predict(passwords)
     rmse_train = root_mean_squared_error(target, predictions)
+    mae_train = mean_absolute_error(target, predictions)
+    errors = predictions - target
+    abs_mean_error_train = abs(float(np.mean(errors)))
+    prediction_target_mean_gap_train = abs(
+        float(np.mean(predictions) - np.mean(target))
+    )
 
     return pipeline, {
         "rmse_train": float(rmse_train),
+        "mae_train": float(mae_train),
+        "abs_mean_error_train": abs_mean_error_train,
+        "prediction_target_mean_gap_train": prediction_target_mean_gap_train,
         "n_rows": int(len(df)),
         "model_type": "Ridge",
         "ngram_min": 1,
