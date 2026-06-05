@@ -390,7 +390,13 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
 
     def register(model, metrics, validation_report=None, model_alias=None):
         calls.append(("register", validation_report, model_alias))
-        return {"model_name": "passwords", "model_alias": "prod", "model_version": "1"}
+        return {
+            "model_name": "passwords",
+            "model_alias": "prod",
+            "model_version": "1",
+            "alias_verified": True,
+            "verified_model_version": "1",
+        }
 
     monkeypatch.setattr("training.run_pipeline.register_model_in_mlflow", register)
     monkeypatch.setattr(
@@ -424,7 +430,7 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
     assert "validation passed" in caplog.text
     assert "model trained" in caplog.text
     assert (
-        "model registered: {'model_name': 'passwords', 'model_alias': 'prod', 'model_version': '1'}"
+        "model registered: {'model_name': 'passwords', 'model_alias': 'prod', 'model_version': '1', 'alias_verified': True, 'verified_model_version': '1'}"
         in caplog.text
     )
     assert (
@@ -475,8 +481,25 @@ def test_run_training_pipeline_requires_reload_url_in_ci_after_registration(
             "model_name": "passwords",
             "model_alias": model_alias,
             "model_version": "1",
+            "alias_verified": True,
+            "verified_model_version": "1",
         },
     )
 
     with pytest.raises(RuntimeError, match="SERVICE_RELOAD_URL is required in CI"):
         run_training_pipeline()
+
+
+def test_registration_alias_gate_rejects_unverified_alias_before_reload():
+    from training.run_pipeline import _ensure_registration_alias_verified
+
+    with pytest.raises(RuntimeError, match="refusing to reload service"):
+        _ensure_registration_alias_verified(
+            {
+                "model_name": "passwords",
+                "model_alias": "prod",
+                "model_version": "2",
+                "alias_verified": False,
+                "verified_model_version": "1",
+            }
+        )

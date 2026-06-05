@@ -34,9 +34,11 @@ def _sanitize_for_log(value: Any) -> Any:
 
     if isinstance(value, dict):
         return {
-            key: _REDACTED_LOG_VALUE
-            if _is_sensitive_log_key(str(key))
-            else _sanitize_for_log(item)
+            key: (
+                _REDACTED_LOG_VALUE
+                if _is_sensitive_log_key(str(key))
+                else _sanitize_for_log(item)
+            )
             for key, item in value.items()
         }
 
@@ -112,6 +114,22 @@ def register_model_in_mlflow(
         validation_report=validation_report,
         model_alias=model_alias,
     )
+
+
+def _ensure_registration_alias_verified(registration_result: dict[str, Any]) -> None:
+    """Require MLflow alias read-back confirmation before service reload."""
+    model_version = str(registration_result.get("model_version"))
+    verified_model_version = str(registration_result.get("verified_model_version"))
+
+    if (
+        registration_result.get("alias_verified") is not True
+        or verified_model_version != model_version
+    ):
+        raise RuntimeError(
+            "MLflow registration did not confirm that alias "
+            f"{registration_result.get('model_alias')!r} points to model version "
+            f"{model_version!r}; refusing to reload service."
+        )
 
 
 def call_reload_model_endpoint() -> dict[str, Any]:
@@ -208,8 +226,9 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
     """Run the training orchestration from download through service reload.
 
     Reload is intentionally called only after these gates complete successfully:
-    data download, data validation, model training, and MLflow registration with
-    the production alias explicitly set for the training job.
+    data download, data validation, model training, MLflow registration, and
+    explicit read-back verification that the production alias points to the new
+    model version.
     """
     resolved_data_url = data_url or os.getenv("DATA_URL")
     if not resolved_data_url:
@@ -260,7 +279,8 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
         model_alias=_PRODUCTION_MODEL_ALIAS,
     )
     logger.info("model registered: %s", _sanitize_for_log(registration_result))
-
+    _ensure_registration_alias_verified(registration_result)
+    logger.info("model alias verified: %s", _sanitize_for_log(registration_result))
     reload_result = call_reload_model_endpoint()
     logger.info("service reloaded: %s", _sanitize_for_log(reload_result))
 

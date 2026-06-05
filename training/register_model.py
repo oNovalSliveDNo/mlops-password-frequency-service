@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,8 @@ from mlflow.tracking import MlflowClient
 
 _SENSITIVE_KEY_PARTS = ("secret", "credential", "password", "token", "key")
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_ALIAS_VERIFICATION_ATTEMPTS = 6
+_ALIAS_VERIFICATION_RETRY_DELAY_SECONDS = 5
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -56,6 +59,54 @@ def _find_registered_model_version(
             return str(model_version.version)
 
     return None
+
+
+def _read_model_alias_version(
+    client: MlflowClient, model_name: str, model_alias: str
+) -> str | None:
+    model_version = client.get_model_version_by_alias(model_name, model_alias)
+    version = getattr(model_version, "version", None)
+    if version is None:
+        return None
+
+    return str(version)
+
+
+def _verify_registered_model_alias(
+    client: MlflowClient,
+    model_name: str,
+    model_alias: str,
+    expected_version: str,
+) -> str:
+    """Read a model alias back from MLflow and require the expected version."""
+    last_observed_version: str | None = None
+    last_read_error: Exception | None = None
+
+    for attempt in range(1, _ALIAS_VERIFICATION_ATTEMPTS + 1):
+        try:
+            last_observed_version = _read_model_alias_version(
+                client, model_name, model_alias
+            )
+            last_read_error = None
+        # Convert MLflow alias read failures into a controlled verification gate failure.
+        except Exception as exc:  # noqa: BLE001
+            last_read_error = exc
+        else:
+            if last_observed_version == expected_version:
+                return last_observed_version
+
+        if attempt < _ALIAS_VERIFICATION_ATTEMPTS:
+            time.sleep(_ALIAS_VERIFICATION_RETRY_DELAY_SECONDS)
+
+    message = (
+        "MLflow alias verification failed: "
+        f"alias {model_alias!r} for model {model_name!r} points to "
+        f"version {last_observed_version!r}, expected {expected_version!r}."
+    )
+    if last_read_error is not None:
+        message = f"{message} Last read error: {last_read_error}"
+
+    raise RuntimeError(message) from last_read_error
 
 
 def register_model_in_mlflow(
@@ -137,11 +188,19 @@ def register_model_in_mlflow(
             "Could not determine registered MLflow model version for this run."
         )
 
-    client.set_registered_model_alias(model_name, resolved_model_alias, version)
+    expected_version = str(version)
+    client.set_registered_model_alias(
+        model_name, resolved_model_alias, expected_version
+    )
+    verified_version = _verify_registered_model_alias(
+        client, model_name, resolved_model_alias, expected_version
+    )
 
     return {
         "model_name": model_name,
         "model_alias": resolved_model_alias,
-        "model_version": str(version),
+        "model_version": expected_version,
+        "alias_verified": True,
+        "verified_model_version": verified_version,
         "run_id": run_id,
     }
