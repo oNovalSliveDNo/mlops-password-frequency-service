@@ -104,77 +104,18 @@ deploy:
   stage: deploy
   image: python:3.11-slim
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $RENDER_DEPLOY_HOOK'
   needs:
     - build
+  before_script:
+    # Устанавливаем curl, так как в slim-образах его может не быть
+    - apt-get update && apt-get install -y curl
   script:
-    - |
-      python - <<'PY'
-      import os
-      import sys
-      import time
-      import urllib.request
-      import urllib.error
-      from urllib.parse import urlparse
-
-      url = os.getenv("RENDER_DEPLOY_HOOK", "")
-
-      if not url:
-          print("RENDER_DEPLOY_HOOK must be set")
-          sys.exit(1)
-
-      if url.startswith("<") or url.endswith(">"):
-          print("RENDER_DEPLOY_HOOK contains angle brackets. Remove < and >.")
-          sys.exit(1)
-
-      parsed = urlparse(url)
-
-      print("Trigger Render deploy")
-      print("scheme:", parsed.scheme)
-      print("host:", parsed.hostname)
-      print("path starts with /deploy:", parsed.path.startswith("/deploy"))
-      print("query exists:", bool(parsed.query))
-      print("url length:", len(url))
-
-      if parsed.scheme != "https":
-          print("RENDER_DEPLOY_HOOK must use https")
-          sys.exit(1)
-
-      if parsed.hostname != "api.render.com":
-          print("Unexpected Render hook host")
-          sys.exit(1)
-
-      if not parsed.path.startswith("/deploy"):
-          print("Unexpected Render hook path")
-          sys.exit(1)
-
-      if not parsed.query:
-          print("Render hook query key is missing")
-          sys.exit(1)
-
-      last_error = None
-
-      for attempt in range(1, 11):
-          try:
-              print(f"Calling Render deploy hook, attempt {attempt}/10")
-              request = urllib.request.Request(url, method="POST")
-
-              with urllib.request.urlopen(request, timeout=60) as response:
-                  body = response.read().decode("utf-8", errors="replace")
-                  print("HTTP status:", response.status)
-                  print("Response:", body)
-                  sys.exit(0)
-
-          except Exception as exc:
-              last_error = exc
-              print(f"Attempt {attempt} failed: {type(exc).__name__}: {exc}")
-
-              if attempt < 10:
-                  time.sleep(5)
-
-      print(f"Render deploy hook failed after all attempts: {type(last_error).__name__}: {last_error}")
-      sys.exit(1)
-      PY
+    - echo "Triggering Render deploy..."
+    # --retry 10: делать до 10 попыток при сетевых сбоях
+    # --retry-delay 5: ждать 5 секунд между попытками
+    # -f: возвращать код ошибки, если HTTP-статус >= 400
+    - curl -f -X POST --retry 10 --retry-delay 5 "$RENDER_DEPLOY_HOOK"
 
 # =========================
 # TRAIN: triggered from FastAPI /trigger
