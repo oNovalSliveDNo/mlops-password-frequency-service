@@ -4,7 +4,10 @@ from dataclasses import dataclass
 from pathlib import Path
 import pytest
 import requests
-
+from training.run_pipeline import (
+    _RELOAD_RETRY_DELAY_SECONDS,
+    _RELOAD_TIMEOUT_SECONDS,
+)
 from training.run_pipeline import call_reload_model_endpoint
 
 
@@ -89,7 +92,7 @@ def test_call_reload_model_endpoint_posts_with_secret(monkeypatch):
         {
             "url": "https://service.example/reload_model",
             "headers": {"X-Service-Token": "super-secret"},
-            "timeout": 10,
+            "timeout": _RELOAD_TIMEOUT_SECONDS,
         }
     ]
 
@@ -125,7 +128,7 @@ def test_call_reload_model_endpoint_retries_and_sanitizes_secret(monkeypatch):
 
     error_message = str(exc_info.value)
     assert attempts == 3
-    assert sleeps == [2, 2]
+    assert sleeps == [_RELOAD_RETRY_DELAY_SECONDS, _RELOAD_RETRY_DELAY_SECONDS]
     assert "ConnectionError" in error_message
     assert "super-secret" not in error_message
 
