@@ -1,5 +1,10 @@
+meta:
+  environment: docker
+  toolchain:
+    name: docker
+
 build:
-  skip: yes
+  skip: true
 
 run:
   image: daniellenova/mlops-password-frequency-service:latest

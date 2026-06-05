@@ -120,9 +120,14 @@ deploy:
 
     - |
       cat > amvera.yml <<EOF
+      meta:
+        environment: docker
+        toolchain:
+          name: docker
+      
       build:
-        skip: yes
-
+        skip: true
+      
       run:
         image: ${DOCKER_IMAGE}:latest
         persistenceMount: /data
