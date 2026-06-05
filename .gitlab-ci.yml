@@ -173,6 +173,7 @@ deploy:
 train_model:
   stage: train
   image: python:3.11-slim
+  resource_group: train-model-prod
   rules:
     - if: '$CI_PIPELINE_SOURCE == "trigger"'
       when: always
