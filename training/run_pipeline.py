@@ -8,8 +8,8 @@ import requests
 
 
 _RELOAD_ATTEMPTS = 3
-_RELOAD_RETRY_DELAY_SECONDS = 2
-_RELOAD_TIMEOUT_SECONDS = 10
+_RELOAD_RETRY_DELAY_SECONDS = 10
+_RELOAD_TIMEOUT_SECONDS = 120
 _DEFAULT_DATA_PATH = "artifacts/new_data.csv"
 _DEFAULT_MODEL_ARTIFACT_PATH = "artifacts/model.joblib"
 _DEFAULT_VALIDATION_REPORT_PATH = "validation_reports/validation_report.json"
