@@ -204,6 +204,7 @@ def test_model_status_returns_model_diagnostics(monkeypatch):
         "last_reload_error": "MLflow model version is not ready",
     }
 
+
 def test_predict_error_detail_does_not_expose_secret(monkeypatch, caplog):
     secret = "predict-secret"
     monkeypatch.setenv("MLFLOW_TRACKING_PASSWORD", secret)

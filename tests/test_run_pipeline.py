@@ -1130,6 +1130,7 @@ def test_registration_alias_gate_rejects_unverified_alias_before_reload():
             }
         )
 
+
 def test_sanitize_for_log_redacts_all_configured_secret_env_values(monkeypatch):
     from training.run_pipeline import _sanitize_for_log
 

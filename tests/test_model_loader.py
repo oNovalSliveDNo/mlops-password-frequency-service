@@ -46,6 +46,4 @@ def test_reload_model_expected_version_mismatch_records_failure_and_preserves_mo
     assert state.loaded_version == "11"
     assert state.model_uri == "models:/passwords/11"
     assert state.last_reload_status == "failed"
-    assert state.last_reload_error == (
-        "Loaded model version does not match requested version: '11' != '12'"
-    )
+    assert state.last_reload_error == "model_reload_failed:RuntimeError"
