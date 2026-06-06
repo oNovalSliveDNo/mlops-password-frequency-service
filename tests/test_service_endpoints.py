@@ -203,7 +203,9 @@ def test_model_state_matches_health_diagnostics(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["model_loaded"] is True
+    assert response.json()["instance_id"] == ""
     assert response.json()["loaded_version"] == "12"
+    assert response.json()["model_uri"] == "models:/passwords/12"
     assert response.json()["last_reload_status"] == "success"
 
 
@@ -238,6 +240,32 @@ def test_model_status_returns_model_diagnostics(monkeypatch):
         "last_reload_status": "failed",
         "last_reload_error": "MLflow model version is not ready",
     }
+
+
+def test_predict_returns_serving_metadata_headers(monkeypatch):
+    monkeypatch.setattr(main, "predict_passwords", lambda passwords: [1.0])
+    monkeypatch.setattr(
+        main,
+        "get_model_state",
+        lambda: ModelServiceState(
+            instance_id="instance-a",
+            model_loaded=True,
+            model_name="passwords",
+            model_alias="prod",
+            loaded_version="12",
+            model_uri="models:/passwords/12",
+            loaded_at="2026-06-05T00:00:00+00:00",
+            last_reload_status="success",
+            last_reload_error=None,
+        ),
+    )
+
+    response = client.post("/predict", json={"Password": ["password"]})
+
+    assert response.status_code == 200
+    assert response.headers["X-Instance-ID"] == "instance-a"
+    assert response.headers["X-Model-Version"] == "12"
+    assert response.json() == {"Times": [1.0]}
 
 
 def test_predict_error_detail_does_not_expose_secret(monkeypatch, caplog):

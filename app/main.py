@@ -143,8 +143,14 @@ def model_status() -> HealthResponse:
     return _current_health_response()
 
 
+def _set_model_headers(response: Response) -> None:
+    model_state = get_model_state()
+    response.headers["X-Instance-ID"] = model_state.instance_id
+    response.headers["X-Model-Version"] = model_state.loaded_version or ""
+
+
 @app.post("/predict", response_model=PredictResponse)
-def predict(request: PredictRequest) -> PredictResponse:
+def predict(request: PredictRequest, response: Response) -> PredictResponse:
     try:
         predictions = predict_passwords(request.Password)
     except RuntimeError as exc:
@@ -160,6 +166,7 @@ def predict(request: PredictRequest) -> PredictResponse:
             detail="Failed to generate predictions",
         ) from exc
 
+    _set_model_headers(response)
     return PredictResponse(Times=predictions)
 
 
