@@ -20,6 +20,7 @@ variables:
   PYTHONUNBUFFERED: "1"
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
   DOCKER_IMAGE: "$DOCKERHUB_USERNAME/mlops-password-frequency-service"
+  TRAINING_IMAGE: "$DOCKERHUB_USERNAME/mlops-password-frequency-service-training"
 
 cache:
   paths:
@@ -94,6 +95,33 @@ build:
       --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
       --destination "${DOCKER_IMAGE}:${CI_COMMIT_SHORT_SHA}"
       --destination "${DOCKER_IMAGE}:latest"
+      --single-snapshot
+      --compressed-caching=false
+
+build_training:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:v1.14.0-debug
+    entrypoint: [""]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+  needs:
+    - lint
+    - format
+    - test
+  script:
+    - |
+      if [ -z "$DOCKERHUB_USERNAME" ] || [ -z "$DOCKERHUB_TOKEN" ]; then
+        echo "DOCKERHUB_USERNAME and DOCKERHUB_TOKEN must be set"
+        exit 1
+      fi
+    - mkdir -p /kaniko/.docker
+    - echo "{\"auths\":{\"https://index.docker.io/v1/\":{\"auth\":\"$(printf "%s:%s" "${DOCKERHUB_USERNAME}" "${DOCKERHUB_TOKEN}" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+    - /kaniko/executor
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "${CI_PROJECT_DIR}/Dockerfile.train"
+      --destination "${TRAINING_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+      --destination "${TRAINING_IMAGE}:latest"
       --single-snapshot
       --compressed-caching=false
 
@@ -172,7 +200,7 @@ deploy:
 # =========================
 train_model:
   stage: train
-  image: python:3.11-slim
+  image: "$TRAINING_IMAGE:latest"
   resource_group: train-model-prod
   rules:
     - if: '$CI_PIPELINE_SOURCE == "trigger"'
@@ -182,9 +210,6 @@ train_model:
     - if: '$CI_PIPELINE_SOURCE == "web" && $DATA_URL'
       when: always
     - when: never
-  before_script:
-    - python -m pip install --upgrade pip
-    - pip install -r requirements-train.txt
   script:
     - |
       if [ -z "$DATA_URL" ]; then
