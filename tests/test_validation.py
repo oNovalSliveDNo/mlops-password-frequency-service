@@ -4,6 +4,10 @@ import pandas as pd
 import pytest
 
 from training.validate_data import validate_password_dataframe
+from training.validation_thresholds import DEFAULT_SCHEMA_THRESHOLDS
+
+
+SCHEMA_THRESHOLDS = dict(DEFAULT_SCHEMA_THRESHOLDS)
 
 
 def make_lowercase_passwords(n: int) -> list[str]:
@@ -41,6 +45,7 @@ def test_validation_accepts_valid_binary_lowercase_data():
         "times_unique_values": [0.0, 1.0],
         "positive_target_share": 0.5,
         "n_duplicate_rows": 0,
+        "thresholds": SCHEMA_THRESHOLDS,
     }
 
 
@@ -160,6 +165,7 @@ def test_validate_data_file_writes_report(tmp_path):
         "times_unique_values": [0.0, 1.0],
         "positive_target_share": 0.5,
         "n_duplicate_rows": 0,
+        "thresholds": SCHEMA_THRESHOLDS,
     }
 
     assert report_path.exists()
@@ -169,6 +175,8 @@ def test_validate_data_file_writes_report(tmp_path):
     assert report["n_rows"] == 2
     assert report["columns"] == ["Password", "Times"]
     assert report["metrics"] == result.metrics
+    assert report["schema_metrics"] == result.metrics
+    assert report["thresholds"] == SCHEMA_THRESHOLDS
 
 
 def test_validate_data_file_writes_invalid_report(tmp_path):
@@ -181,19 +189,59 @@ def test_validate_data_file_writes_invalid_report(tmp_path):
     result = validate_data_file(str(input_path), str(report_path))
 
     assert result == ValidationResult(
-        False, ["Column Times contains non-numeric values"], 0, []
+        False,
+        ["Column Times contains non-numeric values"],
+        1,
+        ["Password", "Times"],
+        metrics=result.metrics,
+        thresholds=SCHEMA_THRESHOLDS,
     )
-    assert report_path.read_text(encoding="utf-8") == (
-        "{\n"
-        '  "is_valid": false,\n'
-        '  "errors": [\n'
-        '    "Column Times contains non-numeric values"\n'
-        "  ],\n"
-        '  "n_rows": 0,\n'
-        '  "columns": [],\n'
-        '  "metrics": null\n'
-        "}"
+    assert result.metrics is not None
+    assert result.metrics["n_rows"] == 1
+    assert result.metrics["columns"] == ["Password", "Times"]
+    assert result.metrics["password_min_length"] == 5
+    assert result.metrics["times_unique_values"] is None
+    assert result.metrics["thresholds"] == SCHEMA_THRESHOLDS
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["is_valid"] is False
+    assert report["errors"] == ["Column Times contains non-numeric values"]
+    assert report["n_rows"] == 1
+    assert report["columns"] == ["Password", "Times"]
+    assert report["metrics"] == result.metrics
+    assert report["schema_metrics"] == result.metrics
+    assert report["thresholds"] == SCHEMA_THRESHOLDS
+
+
+def test_validate_data_file_writes_bad_csv_diagnostics(tmp_path):
+    from training.validate_data import validate_data_file
+
+    input_path = tmp_path / "bad_passwords.csv"
+    report_path = tmp_path / "report.json"
+    input_path.write_text(
+        "Password,Times,Notes\n,1.0,\n ,0.0,\nabc,2.0,\n", encoding="utf-8"
     )
+
+    result = validate_data_file(str(input_path), str(report_path))
+
+    assert result.is_valid is False
+    assert result.n_rows == 3
+    assert result.columns == ["Password", "Times", "Notes"]
+    assert result.metrics is not None
+    assert result.metrics["n_rows"] == 3
+    assert result.metrics["columns"] == ["Password", "Times", "Notes"]
+    assert result.metrics["n_empty_columns"] == 1
+    assert result.metrics["password_min_length"] == 1
+    assert result.metrics["password_max_length"] == 3
+    assert result.metrics["times_min"] == 0.0
+    assert result.metrics["times_max"] == 2.0
+    assert result.metrics["times_unique_values"] == [0.0, 1.0, 2.0]
+    assert result.metrics["positive_target_share"] == pytest.approx(2 / 3)
+    assert result.metrics["thresholds"] == SCHEMA_THRESHOLDS
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["schema_metrics"] == result.metrics
+    assert report["thresholds"] == SCHEMA_THRESHOLDS
 
 
 def test_validate_data_file_writes_read_error_report(tmp_path):
@@ -214,3 +262,4 @@ def test_validate_data_file_writes_read_error_report(tmp_path):
     assert '"errors": [' in report_text
     assert '"n_rows": 0' in report_text
     assert '"columns": []' in report_text
+    assert '"thresholds": {' in report_text

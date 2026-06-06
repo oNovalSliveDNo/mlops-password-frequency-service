@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import pytest
 
 
@@ -53,6 +56,20 @@ def test_register_model_logs_reports_tests_json_artifact(tmp_path, monkeypatch):
     evidently_report_path.write_text('{"status": "ok"}', encoding="utf-8")
 
     logged_artifacts = []
+    logged_validation_report = None
+
+    validation_report = {
+        "is_valid": True,
+        "errors": [],
+        "n_rows": 4,
+        "columns": ["Password", "Times"],
+        "schema_metrics": {
+            "n_rows": 4,
+            "columns": ["Password", "Times"],
+            "thresholds": {"max_password_length": 128},
+        },
+        "thresholds": {"max_password_length": 128},
+    }
 
     monkeypatch.setenv("MLFLOW_TRACKING_URI", "file:///tmp/mlruns")
     monkeypatch.setenv("MODEL_NAME", "password-frequency-model")
@@ -75,8 +92,17 @@ def test_register_model_logs_reports_tests_json_artifact(tmp_path, monkeypatch):
     monkeypatch.setattr(
         register_model.mlflow, "log_param", lambda key, value: None, raising=False
     )
+
+    def log_artifact(path):
+        nonlocal logged_validation_report
+        logged_artifacts.append(path)
+        if path.endswith("validation_report.json"):
+            logged_validation_report = json.loads(
+                Path(path).read_text(encoding="utf-8")
+            )
+
     monkeypatch.setattr(
-        register_model.mlflow, "log_artifact", logged_artifacts.append, raising=False
+        register_model.mlflow, "log_artifact", log_artifact, raising=False
     )
     monkeypatch.setattr(
         register_model.mlflow.sklearn,
@@ -93,10 +119,12 @@ def test_register_model_logs_reports_tests_json_artifact(tmp_path, monkeypatch):
     result = register_model.register_model_in_mlflow(
         model=object(),
         metrics={"rmse_train": 0.1, "n_rows": 4},
+        validation_report=validation_report,
     )
 
     assert str(evidently_report_path) in logged_artifacts
     assert str(project_root / "tests.json") not in logged_artifacts
+    assert logged_validation_report == validation_report
     assert result == {
         "model_name": "password-frequency-model",
         "model_alias": "prod",

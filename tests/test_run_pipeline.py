@@ -14,6 +14,10 @@ from training.run_pipeline import (
     call_reload_model_endpoint,
     verify_serving_after_reload,
 )
+from training.validation_thresholds import DEFAULT_SCHEMA_THRESHOLDS
+
+
+SCHEMA_THRESHOLDS = dict(DEFAULT_SCHEMA_THRESHOLDS)
 
 
 @dataclass(frozen=True)
@@ -338,9 +342,21 @@ def test_run_training_pipeline_stops_on_invalid_schema_validation(monkeypatch, c
         "training.run_pipeline._read_validated_training_dataframe",
         fail_if_called("read_validated"),
     )
+    schema_metrics = {
+        "n_rows": 1,
+        "columns": ["Password", "Times"],
+        "thresholds": SCHEMA_THRESHOLDS,
+    }
     monkeypatch.setattr(
         "training.run_pipeline.validate_data_file",
-        lambda input_path, report_path: ValidationResult(False, ["bad data"], 0, []),
+        lambda input_path, report_path: SimpleNamespace(
+            is_valid=False,
+            errors=["bad data"],
+            n_rows=1,
+            columns=["Password", "Times"],
+            metrics=schema_metrics,
+            thresholds=SCHEMA_THRESHOLDS,
+        ),
     )
     monkeypatch.setattr(
         "training.run_pipeline.validate_model_quality_with_prod_model",
@@ -376,8 +392,10 @@ def test_run_training_pipeline_stops_on_invalid_schema_validation(monkeypatch, c
         "validation_report": {
             "is_valid": False,
             "errors": ["bad data"],
-            "n_rows": 0,
-            "columns": [],
+            "n_rows": 1,
+            "columns": ["Password", "Times"],
+            "schema_metrics": schema_metrics,
+            "thresholds": SCHEMA_THRESHOLDS,
         },
         "errors": ["bad data"],
     }
@@ -401,7 +419,11 @@ def test_run_training_pipeline_stops_on_failed_model_quality(
     scored_df = training_df.assign(
         target_log=[1.0], prediction=[3.0], prediction_error=[2.0]
     )
-    schema_metrics = {"row_count": 1, "null_passwords": 0}
+    schema_metrics = {
+        "row_count": 1,
+        "null_passwords": 0,
+        "thresholds": SCHEMA_THRESHOLDS,
+    }
     model_quality_metrics = {"rmse": 2.0, "mae": 2.0}
     calls = []
 
@@ -423,6 +445,7 @@ def test_run_training_pipeline_stops_on_failed_model_quality(
             columns=["Password", "Times"],
             metrics=schema_metrics,
             cleaned_df=training_df,
+            thresholds=SCHEMA_THRESHOLDS,
         ),
     )
     monkeypatch.setattr(
@@ -480,6 +503,7 @@ def test_run_training_pipeline_stops_on_failed_model_quality(
             "columns": ["Password", "Times"],
             "schema_metrics": schema_metrics,
             "model_quality_metrics": model_quality_metrics,
+            "thresholds": SCHEMA_THRESHOLDS,
         },
         "errors": ["rmse too high for token abc123"],
     }
@@ -576,14 +600,27 @@ def test_main_does_not_train_or_register_on_bad_downloaded_data(tmp_path, monkey
         report = {
             "is_valid": False,
             "errors": ["DataFrame is missing required columns: Times"],
-            "n_rows": 0,
-            "columns": [],
+            "n_rows": 1,
+            "columns": ["Password"],
+            "schema_metrics": {
+                "n_rows": 1,
+                "columns": ["Password"],
+                "thresholds": SCHEMA_THRESHOLDS,
+            },
+            "thresholds": SCHEMA_THRESHOLDS,
         }
         Path(report_path).write_text(
             json.dumps(report, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        return ValidationResult(False, report["errors"], 0, [])
+        return SimpleNamespace(
+            is_valid=False,
+            errors=report["errors"],
+            n_rows=1,
+            columns=["Password"],
+            metrics=report["schema_metrics"],
+            thresholds=SCHEMA_THRESHOLDS,
+        )
 
     def fail_if_called(*args, **kwargs):
         pytest.fail("training or registration side effect must not be called")
@@ -609,7 +646,10 @@ def test_main_does_not_train_or_register_on_bad_downloaded_data(tmp_path, monkey
     validation_report = json.loads(validation_report_path.read_text(encoding="utf-8"))
     assert validation_report["is_valid"] is False
     assert validation_report["errors"]
-    assert validation_report["n_rows"] == 0
+    assert validation_report["n_rows"] == 1
+    assert validation_report["columns"] == ["Password"]
+    assert validation_report["schema_metrics"]["thresholds"] == SCHEMA_THRESHOLDS
+    assert validation_report["thresholds"] == SCHEMA_THRESHOLDS
 
 
 def test_run_training_pipeline_uses_scored_df_for_evidently_after_validation(
@@ -835,7 +875,11 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
     from training.run_pipeline import run_training_pipeline
 
     calls = []
-    schema_metrics = {"row_count": 2, "null_passwords": 0}
+    schema_metrics = {
+        "row_count": 2,
+        "null_passwords": 0,
+        "thresholds": SCHEMA_THRESHOLDS,
+    }
     model_quality_metrics = {"rmse": 0.1, "mae": 0.05}
     training_df = FakeDataFrame(
         {
@@ -854,6 +898,7 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
         "columns": ["Password", "Times"],
         "schema_metrics": schema_metrics,
         "model_quality_metrics": model_quality_metrics,
+        "thresholds": SCHEMA_THRESHOLDS,
     }
     registration_result = {
         "model_name": "passwords",
@@ -878,6 +923,7 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
             columns=["Password", "Times"],
             metrics=schema_metrics,
             cleaned_df=training_df,
+            thresholds=SCHEMA_THRESHOLDS,
         ),
     )
 

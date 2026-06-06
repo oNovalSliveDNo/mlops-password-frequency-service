@@ -402,6 +402,11 @@ def _read_validated_training_dataframe(data_path: str):
 
 
 def _validation_report_dict(validation_result) -> dict[str, Any]:
+    schema_metrics = getattr(validation_result, "metrics", None)
+    thresholds = getattr(validation_result, "thresholds", None)
+    if thresholds is None and isinstance(schema_metrics, dict):
+        thresholds = schema_metrics.get("thresholds")
+
     report = {
         "is_valid": validation_result.is_valid,
         "errors": validation_result.errors,
@@ -409,21 +414,31 @@ def _validation_report_dict(validation_result) -> dict[str, Any]:
         "columns": validation_result.columns,
     }
     if hasattr(validation_result, "metrics"):
-        report["schema_metrics"] = validation_result.metrics
+        report["schema_metrics"] = schema_metrics
+    if thresholds is not None:
+        report["thresholds"] = thresholds
     return report
 
 
 def _merged_validation_report_dict(
     schema_result, model_quality_result
 ) -> dict[str, Any]:
-    return {
+    schema_metrics = getattr(schema_result, "metrics", None)
+    thresholds = getattr(schema_result, "thresholds", None)
+    if thresholds is None and isinstance(schema_metrics, dict):
+        thresholds = schema_metrics.get("thresholds")
+
+    report = {
         "is_valid": schema_result.is_valid and model_quality_result.is_valid,
         "errors": [*schema_result.errors, *model_quality_result.errors],
         "n_rows": schema_result.n_rows,
         "columns": schema_result.columns,
-        "schema_metrics": getattr(schema_result, "metrics", None),
+        "schema_metrics": schema_metrics,
         "model_quality_metrics": model_quality_result.metrics,
     }
+    if thresholds is not None:
+        report["thresholds"] = thresholds
+    return report
 
 
 def _write_validation_report(report: dict[str, Any], report_path: str) -> None:

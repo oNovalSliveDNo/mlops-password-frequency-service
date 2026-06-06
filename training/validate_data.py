@@ -43,6 +43,7 @@ class ValidationResult:
     columns: list[str]
     cleaned_df: pd.DataFrame | None = None
     metrics: dict[str, Any] | None = None
+    thresholds: dict[str, Any] | None = None
 
 
 def run_evidently_tests(df: pd.DataFrame, output_path: str = "tests.json") -> dict:
@@ -80,9 +81,113 @@ def run_evidently_tests(df: pd.DataFrame, output_path: str = "tests.json") -> di
     return report
 
 
+def _schema_thresholds() -> dict[str, Any]:
+    return dict(load_validation_thresholds()["schema"])
+
+
+def _safe_int(value: Any) -> int | None:
+    if pd.isna(value):
+        return None
+    return int(value)
+
+
+def _safe_float(value: Any) -> float | None:
+    if pd.isna(value):
+        return None
+    return float(value)
+
+
+def _empty_mask(df: pd.DataFrame) -> pd.DataFrame:
+    string_empty = df.apply(
+        lambda column: column.map(
+            lambda value: isinstance(value, str) and value.strip() == ""
+        )
+    )
+    return df.isna() | string_empty
+
+
+def _build_raw_validation_diagnostics(
+    df: pd.DataFrame, thresholds: dict[str, Any]
+) -> dict[str, Any]:
+    """Build best-effort diagnostics from untrusted raw input data."""
+    diagnostics: dict[str, Any] = {
+        "n_rows": int(len(df.index)),
+        "columns": [str(column) for column in df.columns],
+        "n_duplicate_rows": None,
+        "n_missing_rows": None,
+        "n_empty_rows": None,
+        "n_missing_columns": None,
+        "n_empty_columns": None,
+        "duplicate_columns": [
+            str(column) for column in df.columns[df.columns.duplicated()].tolist()
+        ],
+        "password_min_length": None,
+        "password_max_length": None,
+        "password_mean_length": None,
+        "times_min": None,
+        "times_max": None,
+        "times_unique_values": None,
+        "positive_target_share": None,
+        "thresholds": dict(thresholds),
+    }
+
+    try:
+        diagnostics["n_duplicate_rows"] = int(df.duplicated().sum())
+    except Exception:
+        diagnostics["n_duplicate_rows"] = None
+
+    try:
+        empty_values = _empty_mask(df)
+        diagnostics["n_missing_rows"] = int(df.isna().any(axis=1).sum())
+        diagnostics["n_empty_rows"] = int(empty_values.all(axis=1).sum())
+        diagnostics["n_missing_columns"] = int(df.isna().any(axis=0).sum())
+        diagnostics["n_empty_columns"] = int(empty_values.all(axis=0).sum())
+    except Exception:
+        pass
+
+    if "Password" in df.columns:
+        try:
+            password_series = df["Password"]
+            if isinstance(password_series, pd.DataFrame):
+                password_series = password_series.iloc[:, 0]
+            password_lengths = password_series.dropna().astype(str).str.len()
+            if not password_lengths.empty:
+                diagnostics["password_min_length"] = _safe_int(password_lengths.min())
+                diagnostics["password_max_length"] = _safe_int(password_lengths.max())
+                diagnostics["password_mean_length"] = _safe_float(
+                    password_lengths.mean()
+                )
+        except Exception:
+            pass
+
+    if "Times" in df.columns:
+        try:
+            times_series = df["Times"]
+            if isinstance(times_series, pd.DataFrame):
+                times_series = times_series.iloc[:, 0]
+            numeric_times = pd.to_numeric(times_series, errors="coerce")
+            numeric_times = numeric_times[
+                np.isfinite(numeric_times.to_numpy(dtype=float))
+            ]
+            if not numeric_times.empty:
+                diagnostics["times_min"] = _safe_float(numeric_times.min())
+                diagnostics["times_max"] = _safe_float(numeric_times.max())
+                diagnostics["times_unique_values"] = sorted(
+                    float(value) for value in numeric_times.dropna().unique()
+                )
+                diagnostics["positive_target_share"] = _safe_float(
+                    (numeric_times > 0).mean()
+                )
+        except Exception:
+            pass
+
+    return diagnostics
+
+
 def _build_validation_metrics(cleaned_df: pd.DataFrame) -> dict[str, Any]:
     password_lengths = cleaned_df["Password"].str.len()
     times_values = cleaned_df["Times"]
+    thresholds = _schema_thresholds()
 
     return {
         "n_rows": int(len(cleaned_df.index)),
@@ -95,6 +200,7 @@ def _build_validation_metrics(cleaned_df: pd.DataFrame) -> dict[str, Any]:
         "times_unique_values": sorted(float(value) for value in times_values.unique()),
         "positive_target_share": float((times_values > 0).mean()),
         "n_duplicate_rows": int(cleaned_df.duplicated().sum()),
+        "thresholds": thresholds,
     }
 
 
@@ -112,7 +218,7 @@ def validate_password_dataframe(
     cleaned dataframe with only these two columns and validation metrics are
     returned.
     """
-    schema_thresholds = load_validation_thresholds()["schema"]
+    schema_thresholds = _schema_thresholds()
     if max_password_length is None:
         max_password_length = int(schema_thresholds["max_password_length"])
     if min_positive_target_share is None:
@@ -241,8 +347,13 @@ def validate_data_file(
     try:
         df = pd.read_csv(input_path)
     except Exception as exc:
-        result = ValidationResult(False, [f"Failed to read CSV file: {exc}"], 0, [])
+        thresholds = _schema_thresholds()
+        result = ValidationResult(
+            False, [f"Failed to read CSV file: {exc}"], 0, [], thresholds=thresholds
+        )
     else:
+        thresholds = _schema_thresholds()
+        raw_metrics = _build_raw_validation_diagnostics(df, thresholds)
         is_valid, errors, cleaned_df, metrics = validate_password_dataframe(df)
         if is_valid:
             if cleaned_df is None or metrics is None:
@@ -256,9 +367,17 @@ def validate_data_file(
                 list(cleaned_df.columns),
                 cleaned_df,
                 metrics,
+                thresholds,
             )
         else:
-            result = ValidationResult(False, errors, 0, [])
+            result = ValidationResult(
+                False,
+                errors,
+                int(len(df.index)),
+                [str(column) for column in df.columns],
+                metrics=raw_metrics,
+                thresholds=thresholds,
+            )
 
     report = {
         "is_valid": result.is_valid,
@@ -266,6 +385,8 @@ def validate_data_file(
         "n_rows": result.n_rows,
         "columns": result.columns,
         "metrics": result.metrics,
+        "schema_metrics": result.metrics,
+        "thresholds": result.thresholds,
     }
     report_file = Path(report_path)
     report_file.parent.mkdir(parents=True, exist_ok=True)
