@@ -141,12 +141,11 @@ def reload_model(expected_model_version: str | None = None) -> ModelLoadMetadata
             loaded_model, loaded_metadata = load_model_from_mlflow(
                 expected_model_version
             )
+            _ensure_expected_version_loaded(loaded_metadata)
         except Exception as exc:
             _last_reload_status = "failed"
             _last_reload_error = str(exc)
             raise
-
-        _ensure_expected_version_loaded(loaded_metadata)
 
         _model = loaded_model
         _model_metadata = loaded_metadata
