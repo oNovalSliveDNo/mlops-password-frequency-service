@@ -1,4 +1,5 @@
 import os
+import socket
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -12,6 +13,15 @@ _last_reload_error: str | None = None
 _model_lock = threading.Lock()
 
 
+def get_instance_id() -> str:
+    """Return a stable diagnostic identifier for this service process."""
+    return (
+        os.getenv("INSTANCE_ID")
+        or os.getenv("SERVICE_INSTANCE_ID")
+        or socket.gethostname()
+    )
+
+
 @dataclass(frozen=True)
 class ModelLoadMetadata:
     model_name: str
@@ -20,6 +30,7 @@ class ModelLoadMetadata:
     loaded_model_version: str | None
     model_uri: str
     reloaded_at: str
+    instance_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -32,6 +43,7 @@ class ModelServiceState:
     loaded_at: str | None
     last_reload_status: str
     last_reload_error: str | None
+    instance_id: str = ""
 
 
 def _get_model_name() -> str:
@@ -98,6 +110,7 @@ def load_model_from_mlflow(
         loaded_model_version=loaded_model_version,
         model_uri=model_uri,
         reloaded_at=datetime.now(UTC).isoformat(),
+        instance_id=get_instance_id(),
     )
 
     return model, metadata
@@ -166,6 +179,7 @@ def get_model_metadata() -> ModelLoadMetadata | None:
 def get_model_state() -> ModelServiceState:
     with _model_lock:
         return ModelServiceState(
+            instance_id=get_instance_id(),
             model_loaded=_model is not None,
             model_name=_model_metadata.model_name
             if _model_metadata is not None

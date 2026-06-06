@@ -52,6 +52,7 @@ class ReloadRequest(BaseModel):
 
 class ReloadResponse(BaseModel):
     status: str
+    instance_id: str | None = None
     model_name: str | None = None
     model_alias: str | None = None
     requested_model_version: str | None = None
@@ -62,6 +63,7 @@ class ReloadResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
+    instance_id: str
     model_loaded: bool
     model_name: str | None = None
     model_alias: str | None = None

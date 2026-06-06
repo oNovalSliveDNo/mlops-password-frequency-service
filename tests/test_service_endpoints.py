@@ -67,6 +67,7 @@ def test_reload_model_with_valid_secret(monkeypatch):
     assert response.status_code == 200
     assert response.json() == {
         "status": "model_reloaded",
+        "instance_id": "",
         "model_name": "passwords",
         "model_alias": "prod",
         "requested_model_version": None,
@@ -138,6 +139,7 @@ def test_health_includes_model_diagnostics(monkeypatch):
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
+        "instance_id": "",
         "model_loaded": True,
         "model_name": "passwords",
         "model_alias": "prod",
@@ -194,6 +196,7 @@ def test_model_status_returns_model_diagnostics(monkeypatch):
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
+        "instance_id": "",
         "model_loaded": True,
         "model_name": "passwords",
         "model_alias": "prod",
@@ -365,6 +368,7 @@ def test_ready_returns_200_when_model_loaded(monkeypatch):
     assert response.status_code == 200
     assert response.json() == {
         "status": "ready",
+        "instance_id": "",
         "model_loaded": True,
         "model_name": "passwords",
         "model_alias": "prod",

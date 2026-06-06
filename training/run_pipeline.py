@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse, urlunparse
-
+import pandas as pd
 import requests
 
 _RELOAD_ATTEMPTS = 3
@@ -205,6 +205,29 @@ def _service_endpoint_url(explicit_env_name: str, fallback_path: str) -> str | N
     )
 
 
+def _split_csv_env(value: str | None) -> list[str]:
+    if not value:
+        return []
+
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _service_state_urls() -> list[str]:
+    """Return state endpoints that must be checked after reload.
+
+    SERVICE_REPLICA_STATE_URLS may contain comma-separated direct /model_state or
+    /health URLs for every serving replica. When it is not set, the current
+    Amvera deployment is treated as a single instance and SERVICE_HEALTH_URL (or
+    SERVICE_RELOAD_URL-derived /health) is checked.
+    """
+    replica_urls = _split_csv_env(os.getenv("SERVICE_REPLICA_STATE_URLS"))
+    if replica_urls:
+        return replica_urls
+
+    health_url = _service_endpoint_url("SERVICE_HEALTH_URL", "/health")
+    return [health_url] if health_url else []
+
+
 def _expected_model_version(registration_result: dict[str, Any] | None) -> str | None:
     if registration_result is None:
         return None
@@ -277,33 +300,43 @@ def verify_serving_after_reload(
         }
 
     expected_version = _expected_model_version(registration_result)
-    health_url = _service_endpoint_url("SERVICE_HEALTH_URL", "/health")
+    state_urls = _service_state_urls()
     predict_url = _service_endpoint_url("SERVICE_PREDICT_URL", "/predict")
-    if not health_url or not predict_url:
+    if not state_urls or not predict_url:
         raise RuntimeError(
-            "SERVICE_HEALTH_URL and SERVICE_PREDICT_URL are required for serving "
-            "verification when SERVICE_RELOAD_URL cannot be used to derive them."
+            "SERVICE_REPLICA_STATE_URLS or SERVICE_HEALTH_URL, and "
+            "SERVICE_PREDICT_URL are required for serving verification when "
+            "SERVICE_RELOAD_URL cannot be used to derive them."
         )
 
-    health_state = _request_json_with_retries("GET", health_url)
-    if health_state.get("model_loaded") is not True:
-        raise RuntimeError(
-            f"Serving health check reports model_loaded={health_state.get('model_loaded')!r}."
-        )
-    if health_state.get("last_reload_status") != "success":
-        raise RuntimeError(
-            "Serving health check reports last_reload_status="
-            f"{health_state.get('last_reload_status')!r}."
-        )
-    if (
-        expected_version is not None
-        and health_state.get("loaded_version") != expected_version
-    ):
-        raise RuntimeError(
-            "Serving health check loaded unexpected model version: "
-            f"{health_state.get('loaded_version')!r} != {expected_version!r}."
-        )
+    replica_states: list[dict[str, Any]] = []
+    for state_url in state_urls:
+        health_state = _request_json_with_retries("GET", state_url)
+        instance_id = health_state.get("instance_id") or state_url
+        if health_state.get("model_loaded") is not True:
+            raise RuntimeError(
+                "Serving state check for instance "
+                f"{instance_id!r} reports model_loaded="
+                f"{health_state.get('model_loaded')!r}."
+            )
+        if health_state.get("last_reload_status") != "success":
+            raise RuntimeError(
+                "Serving state check for instance "
+                f"{instance_id!r} reports last_reload_status="
+                f"{health_state.get('last_reload_status')!r}."
+            )
+        if (
+            expected_version is not None
+            and health_state.get("loaded_version") != expected_version
+        ):
+            raise RuntimeError(
+                "Serving state check for instance "
+                f"{instance_id!r} loaded unexpected model version: "
+                f"{health_state.get('loaded_version')!r} != {expected_version!r}."
+            )
+        replica_states.append({"url": state_url, "state": health_state})
 
+    health_state = replica_states[0]["state"]
     smoke_passwords = _parse_predict_smoke_passwords()
     if not smoke_passwords:
         raise RuntimeError(
@@ -326,6 +359,8 @@ def verify_serving_after_reload(
         "status": "verified",
         "expected_model_version": expected_version,
         "loaded_model_version": health_state.get("loaded_version"),
+        "replica_count": len(replica_states),
+        "replicas": replica_states,
         "health": health_state,
         "predict": {
             "url": predict_url,
@@ -548,6 +583,7 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
 
         logger.info("validation passed")
 
+        training_df: pd.DataFrame
         if hasattr(schema_result, "cleaned_df"):
             training_df = schema_result.cleaned_df
             if training_df is None:
@@ -556,8 +592,6 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
                     "this indicates an internal validation error."
                 )
         else:
-            # Backward-compatible path for tests or external callers that provide
-            # ValidationResult-like objects without the new cleaned_df field.
             training_df = _read_validated_training_dataframe(data_path)
 
         model_quality_result = _timed_step(
@@ -586,7 +620,9 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
                 "errors": errors,
             }
 
-        evidently_input_df = getattr(model_quality_result, "scored_df", None)
+        evidently_input_df: pd.DataFrame | None = getattr(
+            model_quality_result, "scored_df", None
+        )
         if evidently_input_df is None:
             evidently_input_df = training_df
         evidently_report = _timed_step(

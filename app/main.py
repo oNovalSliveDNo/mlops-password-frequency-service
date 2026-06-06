@@ -89,6 +89,7 @@ def _current_health_response() -> HealthResponse:
     model_state = get_model_state()
     return HealthResponse(
         status="ok",
+        instance_id=model_state.instance_id,
         model_loaded=model_state.model_loaded,
         model_name=model_state.model_name,
         model_alias=model_state.model_alias,
@@ -104,6 +105,7 @@ def _current_readiness_response() -> ReadinessResponse:
     model_state = get_model_state()
     return ReadinessResponse(
         status="ready" if model_state.model_loaded else "not_ready",
+        instance_id=model_state.instance_id,
         model_loaded=model_state.model_loaded,
         model_name=model_state.model_name,
         model_alias=model_state.model_alias,
@@ -257,6 +259,7 @@ def reload_model_endpoint(
 
     return ReloadResponse(
         status="model_reloaded",
+        instance_id=load_metadata.instance_id,
         model_name=load_metadata.model_name,
         model_alias=load_metadata.model_alias,
         requested_model_version=load_metadata.requested_model_version,

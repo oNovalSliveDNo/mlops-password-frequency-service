@@ -18,9 +18,10 @@
 6. регистрирует модель в MLflow;
 7. переключает alias `prod` на новую версию;
 8. вызывает `/reload_model`;
-9. сервис начинает использовать новую модель для предсказаний.
+9. проверяет, что нужная версия модели загружена на всех обслуживающих replicas (сейчас — на одной Amvera replica);
+10. сервис начинает использовать новую модель для предсказаний.
 
-Если данные некорректные, новая модель не обучается, alias `prod` не меняется, а сервис продолжает работать на предыдущей стабильной версии.
+11. Если данные некорректные, новая модель не обучается, alias `prod` не меняется, а сервис продолжает работать на предыдущей стабильной версии.
 
 ---
 
@@ -236,6 +237,7 @@ curl -X GET "https://your-amvera-service.amvera.ru/ready"
 ```json
 {
   "status": "ready",
+   "instance_id": "amvera-hostname-or-custom-id",
   "model_loaded": true,
   "model_name": "passwords",
   "model_alias": "prod",
@@ -254,6 +256,7 @@ HTTP status: `503 Service Unavailable`
 ```json
 {
   "status": "not_ready",
+   "instance_id": "amvera-hostname-or-custom-id",
   "model_loaded": false,
   "model_name": null,
   "model_alias": null,
@@ -275,6 +278,12 @@ HTTP status: `503 Service Unavailable`
 
 Обычно его вызывает GitLab CI/CD после успешного обучения и регистрации новой модели в MLflow.
 
+**Фактическая семантика endpoint:** `/reload_model` является локальным для одного Python-процесса/instance: он заменяет модель только в памяти того процесса, который обработал HTTP-запрос. В текущем `amvera.yml` не задано поле `replicas`/`instances`, поэтому проект документирует текущий Amvera deployment как **1 instance / 1 replica**. За счёт этого одиночный вызов `/reload_model` обновляет весь фактически запущенный deployment только при сохранении ограничения `replicas = 1`.
+
+**Operational note:** если в Amvera или в другой платформе включить горизонтальное масштабирование, текущий reload через один публичный URL станет неконсистентным: балансировщик доставит запрос только одной replica, остальные процессы продолжат обслуживать старую модель до собственного reload/restart. Для multi-replica режима нужно отказаться от предположения, что `/reload_model` глобально обновляет сервис, и выбрать отдельную стратегию синхронизации: rolling restart всех replicas, broadcast reload на каждую replica, внешний source of truth для версии модели или загрузку модели по версии из общего хранилища/конфига.
+
+Диагностические ответы `/health`, `/ready`, `/model_state`, `/model_status` и `/reload_model` содержат `instance_id` и версию модели (`loaded_version` или `loaded_model_version`), чтобы post-reload проверки могли отличать отвечающие instances. `instance_id` берётся из `INSTANCE_ID`, затем `SERVICE_INSTANCE_ID`, затем из hostname контейнера.
+
 #### Пример запроса
 
 ```bash
@@ -286,7 +295,14 @@ curl -X POST "https://your-amvera-service.amvera.ru/reload_model" \
 
 ```json
 {
-  "status": "model_reloaded"
+  "status": "model_reloaded",
+  "instance_id": "amvera-hostname-or-custom-id",
+  "model_name": "your-username-mlops-project-model",
+  "model_alias": "prod",
+  "requested_model_version": "12",
+  "loaded_model_version": "12",
+  "model_uri": "models:/your-username-mlops-project-model/12",
+  "reloaded_at": "2026-06-05T00:00:00+00:00"
 }
 ```
 
@@ -359,6 +375,7 @@ Password
 8. Зарегистрировать модель в Model Registry.
 9. Назначить новой версии alias `prod`.
 10. Вызвать `/reload_model` у сервиса.
+11. Проверить `/model_state`/`/health` и убедиться, что нужная версия модели загружена на всех обслуживающих replicas (в текущем Amvera runtime — на единственной replica).
 
 ---
 
@@ -477,6 +494,14 @@ Pipeline по push публикует в DockerHub два тега одного 
 
 Код, локальные файлы и содержимое GitHub-репозитория сами по себе не являются deployment artifact. Для проверки production-версии нужно смотреть, какой DockerHub image/tag запущен в Amvera: конкретная версия деплоя определяется tag `${CI_COMMIT_SHORT_SHA}` из GitLab pipeline.
 
+### Фактический Amvera runtime / replicas
+
+Текущий `amvera.yml` содержит `meta.environment: docker`, `build.skip: true`, `run.image`, `run.persistenceMount` и `run.containerPort`, но **не содержит** настройки `run.replicas`, `replicas`, `instances` или аналогичного поля масштабирования. Поэтому задокументированное runtime-предположение проекта: **1 instance / 1 replica**.
+
+Это предположение важно для model reload: `/reload_model` меняет модель только внутри локального процесса. Пока deployment остаётся single-instance, это эквивалентно обновлению всего сервиса. При включении масштабирования нужно изменить operational strategy перед использованием endpoint в production: либо делать rolling restart всех replicas после переключения MLflow alias, либо вызывать reload на каждую replica напрямую/broadcast-механизмом, либо хранить целевую версию во внешнем source of truth и заставлять каждую replica загружать именно эту версию.
+
+Post-reload verification в training pipeline поддерживает список прямых state endpoints через `SERVICE_REPLICA_STATE_URLS` (comma-separated). Для single-instance Amvera достаточно `SERVICE_HEALTH_URL` или URL, производного от `SERVICE_RELOAD_URL`; для multi-replica deployment необходимо передать state URL каждой обслуживающей replica, иначе проверка через публичный балансировщик подтвердит только один ответивший instance.
+
 ### Роль Amvera
 
 Amvera не должна самостоятельно собирать исходный код проекта. В `amvera.yml` должен быть включён режим `build.skip: true`, а запуск должен происходить из Docker image, собранного GitLab pipeline и опубликованного в DockerHub.
@@ -574,7 +599,8 @@ reload service model
 6. регистрирует модель в MLflow;
 7. переключает alias `prod`;
 8. вызывает `/reload_model`;
-9. сервис начинает использовать новую модель.
+9. проверяет post-reload serving state: `loaded_version` должен совпасть с новой MLflow version на всех configured serving replicas;
+10. сервис начинает использовать новую модель.
 
 ---
 
@@ -598,6 +624,7 @@ AWS_SECRET_ACCESS_KEY=
 
 MODEL_NAME=your-username-mlops-project-model
 MODEL_ALIAS=prod
+INSTANCE_ID=
 
 GITLAB_URL=
 GITLAB_PROJECT_ID=
@@ -610,6 +637,10 @@ GITLAB_TRIGGER_TOKEN=
 
 SERVICE_RELOAD_URL=
 SERVICE_RELOAD_SECRET=
+SERVICE_HEALTH_URL=
+SERVICE_REPLICA_STATE_URLS=
+SERVICE_PREDICT_URL=
+SERVICE_PREDICT_SMOKE_PASSWORDS=password,correcthorsebatterystaple
 ```
 
 Никогда не коммить `.env` в репозиторий.

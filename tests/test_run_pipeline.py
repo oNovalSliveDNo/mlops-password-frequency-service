@@ -296,6 +296,50 @@ def test_verify_serving_after_reload_checks_health_and_predict(monkeypatch):
     ]
 
 
+def test_verify_serving_after_reload_checks_configured_replica_state_urls(monkeypatch):
+    monkeypatch.setenv("SERVICE_RELOAD_URL", "https://service.example/reload_model")
+    monkeypatch.setenv(
+        "SERVICE_REPLICA_STATE_URLS",
+        "https://replica-a.example/model_state,https://replica-b.example/model_state",
+    )
+    calls = []
+
+    def fake_request(method, url, timeout, **kwargs):
+        calls.append(url)
+        if method == "GET":
+            instance_id = "replica-a" if "replica-a" in url else "replica-b"
+            return FakeResponse(
+                json_body={
+                    "status": "ok",
+                    "instance_id": instance_id,
+                    "model_loaded": True,
+                    "loaded_version": "12",
+                    "last_reload_status": "success",
+                }
+            )
+
+        return FakeResponse(json_body={"Times": [1.0, 2.0]})
+
+    monkeypatch.setattr(
+        "training.run_pipeline.requests.request", fake_request, raising=False
+    )
+
+    result = verify_serving_after_reload(
+        {"model_name": "passwords", "model_alias": "prod", "model_version": "12"},
+        {"status": "model_reloaded", "loaded_model_version": "12"},
+    )
+
+    assert result["replica_count"] == 2
+    assert [item["state"]["instance_id"] for item in result["replicas"]] == [
+        "replica-a",
+        "replica-b",
+    ]
+    assert calls[:2] == [
+        "https://replica-a.example/model_state",
+        "https://replica-b.example/model_state",
+    ]
+
+
 def test_verify_serving_after_reload_rejects_stale_loaded_version(monkeypatch):
     monkeypatch.setenv("SERVICE_HEALTH_URL", "https://service.example/health")
     monkeypatch.setenv("SERVICE_PREDICT_URL", "https://service.example/predict")
