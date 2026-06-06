@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 import requests
 from training.run_pipeline import (
+    _RELOAD_ATTEMPTS,
     _RELOAD_RETRY_DELAY_SECONDS,
     _RELOAD_TIMEOUT_SECONDS,
 )
@@ -214,7 +215,9 @@ def test_call_reload_model_endpoint_returns_status_for_non_json(monkeypatch):
     assert call_reload_model_endpoint() == {"status": "success", "http_status": 204}
 
 
-def test_call_reload_model_endpoint_retries_and_sanitizes_secret(monkeypatch):
+def test_call_reload_model_endpoint_returns_alias_updated_status_on_failure(
+    monkeypatch,
+):
     monkeypatch.setenv("SERVICE_RELOAD_URL", "https://service.example/reload_model")
     monkeypatch.setenv("SERVICE_RELOAD_SECRET", "super-secret")
     attempts = 0
@@ -222,21 +225,37 @@ def test_call_reload_model_endpoint_retries_and_sanitizes_secret(monkeypatch):
 
     def fake_post(url, headers, json, timeout):
         nonlocal attempts
-        assert json is None
+        assert json == {
+            "model_name": "passwords",
+            "model_alias": "prod",
+            "expected_model_version": "12",
+        }
         attempts += 1
         raise requests.ConnectionError("network failure with super-secret")
 
     monkeypatch.setattr("training.run_pipeline.requests.post", fake_post)
     monkeypatch.setattr("training.run_pipeline.time.sleep", sleeps.append)
 
-    with pytest.raises(RuntimeError) as exc_info:
-        call_reload_model_endpoint()
+    result = call_reload_model_endpoint(
+        {
+            "model_name": "passwords",
+            "model_alias": "prod",
+            "model_version": "12",
+        }
+    )
 
-    error_message = str(exc_info.value)
-    assert attempts == 3
-    assert sleeps == [_RELOAD_RETRY_DELAY_SECONDS, _RELOAD_RETRY_DELAY_SECONDS]
-    assert "ConnectionError" in error_message
-    assert "super-secret" not in error_message
+    assert attempts == _RELOAD_ATTEMPTS
+    assert sleeps == [_RELOAD_RETRY_DELAY_SECONDS] * (_RELOAD_ATTEMPTS - 1)
+    assert result == {
+        "status": "reload_failed_but_alias_updated",
+        "reason": "service reload endpoint failed after MLflow alias update",
+        "attempts": _RELOAD_ATTEMPTS,
+        "last_error": "ConnectionError: network failure with [REDACTED]",
+        "model_name": "passwords",
+        "model_alias": "prod",
+        "expected_model_version": "12",
+    }
+    assert "super-secret" not in str(result)
 
 
 def test_verify_serving_after_reload_checks_predict_then_health_diagnostics(
@@ -1413,6 +1432,52 @@ def _stub_successful_pipeline_until_serving_verification(
         "training.run_pipeline.call_reload_model_endpoint", reload_model
     )
     return calls
+
+
+def test_run_training_pipeline_continues_when_reload_fails_after_alias_update(
+    monkeypatch,
+):
+    from training.run_pipeline import run_training_pipeline
+
+    calls = _stub_successful_pipeline_until_serving_verification(monkeypatch)
+    reload_result = {
+        "status": "reload_failed_but_alias_updated",
+        "reason": "service reload endpoint failed after MLflow alias update",
+        "attempts": _RELOAD_ATTEMPTS,
+        "last_error": "ReadTimeout",
+        "model_name": "passwords",
+        "model_alias": "prod",
+        "expected_model_version": "1",
+    }
+
+    def reload_model(registration_result=None):
+        calls.append(("reload", registration_result))
+        return reload_result
+
+    def verify_serving(registration_result, actual_reload_result, training_df):
+        calls.append(("verify_serving", registration_result, actual_reload_result))
+        return {
+            "status": "verified",
+            "loaded_model_version": registration_result["model_version"],
+        }
+
+    monkeypatch.setattr(
+        "training.run_pipeline.call_reload_model_endpoint", reload_model
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.verify_serving_after_reload", verify_serving
+    )
+
+    result = run_training_pipeline()
+
+    assert [call[0] for call in calls] == ["reload", "verify_serving"]
+    assert calls[1][2] is reload_result
+    assert result["status"] == "success"
+    assert result["reload"] is reload_result
+    assert result["serving_verification"] == {
+        "status": "verified",
+        "loaded_model_version": "1",
+    }
 
 
 def test_run_training_pipeline_warns_when_serving_verification_fails_by_default(

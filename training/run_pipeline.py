@@ -11,9 +11,9 @@ from urllib.parse import urljoin, urlparse, urlunparse
 import pandas as pd
 import requests
 
-_RELOAD_ATTEMPTS = 3
+_RELOAD_ATTEMPTS = 2
 _RELOAD_RETRY_DELAY_SECONDS = 10
-_RELOAD_TIMEOUT_SECONDS = 120
+_RELOAD_TIMEOUT_SECONDS = 30
 _SERVING_CHECK_TIMEOUT_SECONDS = 30
 _SERVING_VERIFICATION_SAMPLE_SIZE = 20
 _SERVING_VERIFICATION_MIN_SAMPLE_SIZE = 20
@@ -708,10 +708,24 @@ def call_reload_model_endpoint(
             if attempt < _RELOAD_ATTEMPTS:
                 time.sleep(_RELOAD_RETRY_DELAY_SECONDS)
 
-    raise RuntimeError(
-        "Failed to reload service model after "
-        f"{_RELOAD_ATTEMPTS} attempts. Last error: {_sanitize_for_log(last_error)}."
+    sanitized_last_error = _sanitize_for_log(last_error)
+    logger.warning(
+        "service reload failed after MLflow alias update; relying on /predict "
+        "auto-reload fallback for alias %r. Last error: %s",
+        (registration_result or {}).get("model_alias", _PRODUCTION_MODEL_ALIAS),
+        sanitized_last_error,
     )
+    return {
+        "status": "reload_failed_but_alias_updated",
+        "reason": "service reload endpoint failed after MLflow alias update",
+        "attempts": _RELOAD_ATTEMPTS,
+        "last_error": sanitized_last_error,
+        "model_name": (registration_result or {}).get("model_name"),
+        "model_alias": (registration_result or {}).get(
+            "model_alias", _PRODUCTION_MODEL_ALIAS
+        ),
+        "expected_model_version": (registration_result or {}).get("model_version"),
+    }
 
 
 def _read_validated_training_dataframe(data_path: str):
