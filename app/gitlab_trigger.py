@@ -10,7 +10,7 @@ _REQUIRED_ENV_VARS = (
     "GITLAB_PROJECT_ID",
     "GITLAB_TRIGGER_TOKEN",
 )
-_REQUEST_TIMEOUT_SECONDS = 30
+_REQUEST_TIMEOUT_SECONDS = 5
 
 
 def _get_required_env(name: str) -> str:

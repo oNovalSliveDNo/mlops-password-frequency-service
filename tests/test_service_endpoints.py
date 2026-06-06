@@ -1,4 +1,5 @@
 import logging
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,13 +12,11 @@ from app.model_loader import ModelLoadMetadata, ModelServiceState
 client = TestClient(main.app)
 
 
-def test_trigger_starts_pipeline(monkeypatch):
+def test_trigger_accepts_pipeline_task(monkeypatch):
+    calls = []
+
     def fake_trigger_training_pipeline(data_url: str):
-        assert data_url == "https://example.com/data.csv"
-        return {
-            "pipeline_id": 123,
-            "web_url": "https://gitlab/pipeline/123",
-        }
+        calls.append(data_url)
 
     monkeypatch.setattr(
         main,
@@ -31,9 +30,42 @@ def test_trigger_starts_pipeline(monkeypatch):
     )
 
     assert response.status_code == 202
-    body = response.json()
-    assert body["status"] == "started"
-    assert body["pipeline_id"] == 123
+    assert response.json() == {
+        "status": "accepted",
+        "pipeline_id": None,
+        "message": None,
+    }
+    assert calls == ["https://example.com/data.csv"]
+
+
+def test_trigger_handler_queues_task_without_waiting(monkeypatch):
+    called = False
+
+    def slow_trigger_training_pipeline(data_url: str):
+        nonlocal called
+        called = True
+        time.sleep(1)
+
+    monkeypatch.setattr(
+        main,
+        "trigger_training_pipeline",
+        slow_trigger_training_pipeline,
+    )
+
+    background_tasks = main.BackgroundTasks()
+    response = main.Response()
+    start = time.perf_counter()
+
+    result = main.trigger(
+        main.TriggerRequest(data_url="https://example.com/data.csv"),
+        background_tasks,
+        response,
+    )
+
+    assert time.perf_counter() - start < 0.1
+    assert response.status_code == 202
+    assert result.status == "accepted"
+    assert called is False
 
 
 def test_trigger_invalid_payload():
@@ -227,7 +259,7 @@ def test_predict_error_detail_does_not_expose_secret(monkeypatch, caplog):
     assert "[REDACTED]" in caplog.text
 
 
-def test_trigger_error_detail_does_not_expose_secret(monkeypatch, caplog):
+def test_trigger_background_error_does_not_expose_secret(monkeypatch, caplog):
     secret = "gitlab-trigger-secret"
     monkeypatch.setenv("GITLAB_TRIGGER_TOKEN", secret)
 
@@ -244,8 +276,8 @@ def test_trigger_error_detail_does_not_expose_secret(monkeypatch, caplog):
             json={"data_url": "https://example.com/data.csv"},
         )
 
-    assert response.status_code == 500
-    assert response.json()["detail"] == "GitLab trigger is not configured correctly"
+    assert response.status_code == 202
+    assert response.json()["status"] == "accepted"
     assert secret not in response.text
     assert secret not in caplog.text
     assert "[REDACTED]" in caplog.text

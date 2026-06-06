@@ -3,7 +3,7 @@ import os
 import re
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Response, status
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Response, status
 
 from app.gitlab_trigger import trigger_training_pipeline
 from app.model_loader import get_model_state, predict_passwords, reload_model
@@ -163,41 +163,22 @@ def predict(request: PredictRequest) -> PredictResponse:
     return PredictResponse(Times=predictions)
 
 
-@app.post("/trigger", response_model=TriggerResponse)
-def trigger(request: TriggerRequest, response: Response) -> TriggerResponse:
+def _run_trigger_training_pipeline(data_url: str) -> None:
     try:
-        result = trigger_training_pipeline(data_url=request.data_url)
-    except ValueError as exc:
-        _log_endpoint_error("/trigger", exc)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid training trigger request",
-        ) from exc
-    except RuntimeError as exc:
-        _log_endpoint_error("/trigger", exc)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="GitLab trigger is not configured correctly",
-        ) from exc
+        trigger_training_pipeline(data_url=data_url)
     except Exception as exc:
-        _log_endpoint_error("/trigger", exc)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Failed to start GitLab training pipeline",
-        ) from exc
+        _log_endpoint_error("/trigger background task", exc)
 
+
+@app.post("/trigger", response_model=TriggerResponse)
+def trigger(
+    request: TriggerRequest,
+    background_tasks: BackgroundTasks,
+    response: Response,
+) -> TriggerResponse:
+    background_tasks.add_task(_run_trigger_training_pipeline, data_url=request.data_url)
     response.status_code = status.HTTP_202_ACCEPTED
-    pipeline_id = result.get("pipeline_id")
-    message = "Training pipeline started"
-    web_url = result.get("web_url")
-    if web_url:
-        message = f"Training pipeline started: {web_url}"
-
-    return TriggerResponse(
-        status="started",
-        pipeline_id=pipeline_id,
-        message=message,
-    )
+    return TriggerResponse(status="accepted")
 
 
 @app.post("/reload_model", response_model=ReloadResponse)

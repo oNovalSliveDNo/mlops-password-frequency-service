@@ -56,7 +56,7 @@ def test_trigger_training_pipeline_uses_trigger_endpoint_without_project_token(
                 "ref": "feature/ref",
                 "variables[DATA_URL]": "https://example.com/data.csv",
             },
-            "timeout": 30,
+            "timeout": 5,
         }
     ]
 
