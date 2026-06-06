@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -13,7 +14,11 @@ _RELOAD_ATTEMPTS = 3
 _RELOAD_RETRY_DELAY_SECONDS = 10
 _RELOAD_TIMEOUT_SECONDS = 120
 _SERVING_CHECK_TIMEOUT_SECONDS = 30
-_DEFAULT_PREDICT_SMOKE_PASSWORDS = ("password", "correcthorsebatterystaple")
+_SERVING_VERIFICATION_SAMPLE_SIZE = 20
+_SERVING_VERIFICATION_MIN_SAMPLE_SIZE = 20
+_SERVING_VERIFICATION_MAX_SAMPLE_SIZE = 50
+_SERVING_VERIFICATION_ROUNDS = 3
+_SERVING_PREDICT_MAX_ABS_ERROR_TOLERANCE = 0.5
 _DEFAULT_DATA_PATH = "artifacts/new_data.csv"
 _DEFAULT_MODEL_ARTIFACT_PATH = "artifacts/model.joblib"
 _DEFAULT_VALIDATION_REPORT_PATH = "validation_reports/validation_report.json"
@@ -218,13 +223,13 @@ def _service_state_urls() -> list[str]:
     SERVICE_REPLICA_STATE_URLS may contain comma-separated direct /model_state or
     /health URLs for every serving replica. When it is not set, the current
     Amvera deployment is treated as a single instance and SERVICE_HEALTH_URL (or
-    SERVICE_RELOAD_URL-derived /health) is checked.
+    SERVICE_RELOAD_URL-derived /model_state) is checked.
     """
     replica_urls = _split_csv_env(os.getenv("SERVICE_REPLICA_STATE_URLS"))
     if replica_urls:
         return replica_urls
 
-    health_url = _service_endpoint_url("SERVICE_HEALTH_URL", "/health")
+    health_url = _service_endpoint_url("SERVICE_HEALTH_URL", "/model_state")
     return [health_url] if health_url else []
 
 
@@ -239,13 +244,117 @@ def _expected_model_version(registration_result: dict[str, Any] | None) -> str |
     return str(model_version)
 
 
-def _parse_predict_smoke_passwords() -> list[str]:
-    raw_passwords = os.getenv("SERVICE_PREDICT_SMOKE_PASSWORDS")
-    if raw_passwords is None:
-        return list(_DEFAULT_PREDICT_SMOKE_PASSWORDS)
+def _parse_int_env(env_name: str, default_value: int) -> int:
+    raw_value = os.getenv(env_name)
+    if raw_value is None:
+        return default_value
 
-    passwords = [password.strip() for password in raw_passwords.split(",")]
-    return [password for password in passwords if password]
+    try:
+        return int(raw_value)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"{env_name} must be an integer, got {raw_value!r}."
+        ) from exc
+
+
+def _parse_float_env(env_name: str, default_value: float) -> float:
+    raw_value = os.getenv(env_name)
+    if raw_value is None:
+        return default_value
+
+    try:
+        return float(raw_value)
+    except ValueError as exc:
+        raise RuntimeError(f"{env_name} must be a float, got {raw_value!r}.") from exc
+
+
+def _serving_verification_sample(training_df: pd.DataFrame) -> pd.DataFrame:
+    sample_size = _parse_int_env(
+        "SERVICE_PREDICT_CHECK_ROWS", _SERVING_VERIFICATION_SAMPLE_SIZE
+    )
+    sample_size = max(
+        _SERVING_VERIFICATION_MIN_SAMPLE_SIZE,
+        min(_SERVING_VERIFICATION_MAX_SAMPLE_SIZE, sample_size),
+    )
+
+    if not {"Password", "Times"}.issubset(training_df.columns):
+        raise RuntimeError(
+            "training_df must contain Password and Times columns for serving "
+            "prediction verification."
+        )
+
+    check_df = training_df[["Password", "Times"]].dropna().copy()
+    check_df["Times"] = pd.to_numeric(check_df["Times"], errors="coerce")
+    check_df = check_df.dropna(subset=["Password", "Times"])
+    check_df = check_df[check_df["Times"] >= 0]
+    if check_df.empty:
+        raise RuntimeError(
+            "training_df does not contain any valid Password/Times rows for "
+            "serving prediction verification."
+        )
+
+    row_count = min(sample_size, len(check_df.index))
+    return check_df.head(row_count).reset_index(drop=True)
+
+
+def _assert_serving_state(
+    health_state: dict[str, Any], state_url: str, expected_version: str | None
+) -> None:
+    instance_id = health_state.get("instance_id") or state_url
+    if health_state.get("model_loaded") is not True:
+        raise RuntimeError(
+            "Serving state check for instance "
+            f"{instance_id!r} reports model_loaded="
+            f"{health_state.get('model_loaded')!r}."
+        )
+    if health_state.get("last_reload_status") != "success":
+        raise RuntimeError(
+            "Serving state check for instance "
+            f"{instance_id!r} reports last_reload_status="
+            f"{health_state.get('last_reload_status')!r}."
+        )
+    if (
+        expected_version is not None
+        and health_state.get("loaded_version") != expected_version
+    ):
+        raise RuntimeError(
+            "Serving state check for instance "
+            f"{instance_id!r} loaded unexpected model version: "
+            f"{health_state.get('loaded_version')!r} != {expected_version!r}."
+        )
+
+
+def _validate_predict_response(
+    predict_result: dict[str, Any], passwords: list[str], expected_targets: list[float]
+) -> tuple[list[float], float]:
+    predictions = predict_result.get("Times")
+    if not isinstance(predictions, list) or len(predictions) != len(passwords):
+        raise RuntimeError(
+            "Serving predict check returned invalid Times: "
+            f"{_sanitize_for_log(predictions)!r}."
+        )
+
+    prediction_values: list[float] = []
+    for prediction in predictions:
+        try:
+            prediction_value = float(prediction)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Serving predict check returned non-numeric Times: "
+                f"{_sanitize_for_log(predictions)!r}."
+            ) from exc
+        if not math.isfinite(prediction_value):
+            raise RuntimeError(
+                "Serving predict check returned non-finite Times: "
+                f"{_sanitize_for_log(predictions)!r}."
+            )
+        prediction_values.append(prediction_value)
+
+    max_abs_error = max(
+        abs(prediction - expected)
+        for prediction, expected in zip(prediction_values, expected_targets)
+    )
+    return prediction_values, float(max_abs_error)
 
 
 def _request_json_with_retries(method: str, url: str, **kwargs) -> dict[str, Any]:
@@ -291,6 +400,7 @@ def _request_json_with_retries(method: str, url: str, **kwargs) -> dict[str, Any
 def verify_serving_after_reload(
     registration_result: dict[str, Any] | None,
     reload_result: dict[str, Any],
+    training_df: pd.DataFrame,
 ) -> dict[str, Any]:
     """Verify that the serving app exposes the reloaded model and predicts."""
     if reload_result.get("status") == "skipped":
@@ -309,51 +419,87 @@ def verify_serving_after_reload(
             "SERVICE_RELOAD_URL cannot be used to derive them."
         )
 
-    replica_states: list[dict[str, Any]] = []
-    for state_url in state_urls:
-        health_state = _request_json_with_retries("GET", state_url)
-        instance_id = health_state.get("instance_id") or state_url
-        if health_state.get("model_loaded") is not True:
-            raise RuntimeError(
-                "Serving state check for instance "
-                f"{instance_id!r} reports model_loaded="
-                f"{health_state.get('model_loaded')!r}."
-            )
-        if health_state.get("last_reload_status") != "success":
-            raise RuntimeError(
-                "Serving state check for instance "
-                f"{instance_id!r} reports last_reload_status="
-                f"{health_state.get('last_reload_status')!r}."
-            )
-        if (
-            expected_version is not None
-            and health_state.get("loaded_version") != expected_version
-        ):
-            raise RuntimeError(
-                "Serving state check for instance "
-                f"{instance_id!r} loaded unexpected model version: "
-                f"{health_state.get('loaded_version')!r} != {expected_version!r}."
-            )
-        replica_states.append({"url": state_url, "state": health_state})
-
-    health_state = replica_states[0]["state"]
-    smoke_passwords = _parse_predict_smoke_passwords()
-    if not smoke_passwords:
-        raise RuntimeError(
-            "SERVICE_PREDICT_SMOKE_PASSWORDS did not contain any passwords."
-        )
-
-    predict_result = _request_json_with_retries(
-        "POST",
-        predict_url,
-        json={"Password": smoke_passwords},
+    sample_df = _serving_verification_sample(training_df)
+    sample_passwords = [str(password) for password in sample_df["Password"].tolist()]
+    expected_targets = [
+        float(math.log10(float(times) + 1.0)) for times in sample_df["Times"].tolist()
+    ]
+    tolerance = _parse_float_env(
+        "SERVICE_PREDICT_MAX_ABS_ERROR_TOLERANCE",
+        _SERVING_PREDICT_MAX_ABS_ERROR_TOLERANCE,
     )
-    predictions = predict_result.get("Times")
-    if not isinstance(predictions, list) or len(predictions) != len(smoke_passwords):
-        raise RuntimeError(
-            "Serving predict smoke check returned invalid Times: "
-            f"{_sanitize_for_log(predictions)!r}."
+    if tolerance < 0:
+        raise RuntimeError("SERVICE_PREDICT_MAX_ABS_ERROR_TOLERANCE must be >= 0.")
+
+    rounds = max(
+        1,
+        _parse_int_env(
+            "SERVICE_SERVING_VERIFICATION_ROUNDS", _SERVING_VERIFICATION_ROUNDS
+        ),
+    )
+
+    replica_checks: list[dict[str, Any]] = []
+    latest_replica_states_by_url: dict[str, dict[str, Any]] = {}
+    predict_checks: list[dict[str, Any]] = []
+    max_abs_error = 0.0
+
+    for round_number in range(1, rounds + 1):
+        for state_url in state_urls:
+            health_state = _request_json_with_retries("GET", state_url)
+            _assert_serving_state(health_state, state_url, expected_version)
+
+            replica_state = {
+                "round": round_number,
+                "url": state_url,
+                "state": health_state,
+            }
+            replica_checks.append(replica_state)
+            latest_replica_states_by_url[state_url] = replica_state
+
+        predict_result = _request_json_with_retries(
+            "POST",
+            predict_url,
+            json={"Password": sample_passwords},
         )
+        _, round_max_abs_error = _validate_predict_response(
+            predict_result, sample_passwords, expected_targets
+        )
+        max_abs_error = max(max_abs_error, round_max_abs_error)
+        predict_checks.append(
+            {
+                "round": round_number,
+                "url": predict_url,
+                "request_count": len(sample_passwords),
+                "response_count": len(sample_passwords),
+                "max_abs_error": round_max_abs_error,
+            }
+        )
+
+        logger.info(
+            "serving predict check round %s/%s: checked_rows=%s "
+            "max_abs_error=%.6f tolerance=%.6f sample_passwords=%s",
+            round_number,
+            rounds,
+            len(sample_passwords),
+            round_max_abs_error,
+            tolerance,
+            _sanitize_for_log(sample_passwords[:5]),
+        )
+
+        if round_max_abs_error > tolerance:
+            raise RuntimeError(
+                "Serving predict check exceeded max_abs_error tolerance: "
+                f"{round_max_abs_error:.6f} > {tolerance:.6f}; "
+                f"checked_rows={len(sample_passwords)}; "
+                f"sample_passwords={_sanitize_for_log(sample_passwords[:5])!r}."
+            )
+
+    ordered_unique_state_urls = list(dict.fromkeys(state_urls))
+    replica_states = [
+        latest_replica_states_by_url[state_url]
+        for state_url in ordered_unique_state_urls
+    ]
+    health_state = replica_states[-1]["state"]
 
     return {
         "status": "verified",
@@ -361,11 +507,19 @@ def verify_serving_after_reload(
         "loaded_model_version": health_state.get("loaded_version"),
         "replica_count": len(replica_states),
         "replicas": replica_states,
+        "replica_checks": replica_checks,
         "health": health_state,
         "predict": {
             "url": predict_url,
-            "request_count": len(smoke_passwords),
-            "response_count": len(predictions),
+            "request_count": len(sample_passwords),
+            "response_count": len(sample_passwords),
+            "rounds": rounds,
+            "checked_rows": len(sample_passwords),
+            "max_abs_error": max_abs_error,
+            "tolerance": tolerance,
+            "target_scale": "log10_times_plus_1",
+            "sample_passwords": sample_passwords[:5],
+            "checks": predict_checks,
         },
     }
 
@@ -668,6 +822,7 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
             verify_serving_after_reload,
             registration_result,
             reload_result,
+            training_df,
         )
         logger.info(
             "service state checked: %s", _sanitize_for_log(serving_verification)

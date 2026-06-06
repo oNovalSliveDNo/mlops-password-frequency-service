@@ -640,7 +640,10 @@ SERVICE_RELOAD_SECRET=
 SERVICE_HEALTH_URL=
 SERVICE_REPLICA_STATE_URLS=
 SERVICE_PREDICT_URL=
-SERVICE_PREDICT_SMOKE_PASSWORDS=password,correcthorsebatterystaple
+# Post-reload verification: sample 20-50 training rows and check /predict repeatedly
+SERVICE_PREDICT_CHECK_ROWS=20
+SERVICE_SERVING_VERIFICATION_ROUNDS=3
+SERVICE_PREDICT_MAX_ABS_ERROR_TOLERANCE=0.5
 ```
 
 Никогда не коммить `.env` в репозиторий.

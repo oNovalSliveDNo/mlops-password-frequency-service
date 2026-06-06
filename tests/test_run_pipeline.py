@@ -12,6 +12,7 @@ from training.run_pipeline import (
 )
 from training.run_pipeline import (
     call_reload_model_endpoint,
+    pd as pipeline_pd,
     verify_serving_after_reload,
 )
 from training.validation_thresholds import DEFAULT_SCHEMA_THRESHOLDS
@@ -239,8 +240,14 @@ def test_call_reload_model_endpoint_retries_and_sanitizes_secret(monkeypatch):
 
 def test_verify_serving_after_reload_checks_health_and_predict(monkeypatch):
     monkeypatch.setenv("SERVICE_RELOAD_URL", "https://service.example/reload_model")
-    monkeypatch.setenv("SERVICE_PREDICT_SMOKE_PASSWORDS", "alpha,beta")
     calls = []
+
+    training_df = pipeline_pd.DataFrame(
+        {
+            "Password": ["alpha", "beta"],
+            "Times": [9.0, 99.0],
+        }
+    )
 
     def fake_request(method, url, timeout, **kwargs):
         calls.append(
@@ -270,20 +277,47 @@ def test_verify_serving_after_reload_checks_health_and_predict(monkeypatch):
     result = verify_serving_after_reload(
         {"model_name": "passwords", "model_alias": "prod", "model_version": "12"},
         {"status": "model_reloaded", "loaded_model_version": "12"},
+        training_df,
     )
 
     assert result["status"] == "verified"
     assert result["expected_model_version"] == "12"
     assert result["loaded_model_version"] == "12"
-    assert result["predict"] == {
-        "url": "https://service.example/predict",
-        "request_count": 2,
-        "response_count": 2,
-    }
+    assert result["predict"]["url"] == "https://service.example/predict"
+    assert result["predict"]["request_count"] == 2
+    assert result["predict"]["response_count"] == 2
+    assert result["predict"]["checked_rows"] == 2
+    assert result["predict"]["max_abs_error"] == 0.0
+    assert result["predict"]["rounds"] == 3
+    assert result["predict"]["sample_passwords"] == ["alpha", "beta"]
     assert calls == [
         {
             "method": "GET",
-            "url": "https://service.example/health",
+            "url": "https://service.example/model_state",
+            "timeout": 30,
+            "kwargs": {},
+        },
+        {
+            "method": "POST",
+            "url": "https://service.example/predict",
+            "timeout": 30,
+            "kwargs": {"json": {"Password": ["alpha", "beta"]}},
+        },
+        {
+            "method": "GET",
+            "url": "https://service.example/model_state",
+            "timeout": 30,
+            "kwargs": {},
+        },
+        {
+            "method": "POST",
+            "url": "https://service.example/predict",
+            "timeout": 30,
+            "kwargs": {"json": {"Password": ["alpha", "beta"]}},
+        },
+        {
+            "method": "GET",
+            "url": "https://service.example/model_state",
             "timeout": 30,
             "kwargs": {},
         },
@@ -296,6 +330,37 @@ def test_verify_serving_after_reload_checks_health_and_predict(monkeypatch):
     ]
 
 
+def test_verify_serving_after_reload_rejects_prediction_error(monkeypatch):
+    monkeypatch.setenv("SERVICE_RELOAD_URL", "https://service.example/reload_model")
+    monkeypatch.setenv("SERVICE_SERVING_VERIFICATION_ROUNDS", "1")
+    monkeypatch.setenv("SERVICE_PREDICT_MAX_ABS_ERROR_TOLERANCE", "0.1")
+    training_df = pipeline_pd.DataFrame({"Password": ["alpha"], "Times": [9.0]})
+
+    def fake_request(method, url, timeout, **kwargs):
+        if method == "GET":
+            return FakeResponse(
+                json_body={
+                    "status": "ok",
+                    "model_loaded": True,
+                    "loaded_version": "12",
+                    "last_reload_status": "success",
+                }
+            )
+
+        return FakeResponse(json_body={"Times": [9.0]})
+
+    monkeypatch.setattr(
+        "training.run_pipeline.requests.request", fake_request, raising=False
+    )
+
+    with pytest.raises(RuntimeError, match="max_abs_error tolerance"):
+        verify_serving_after_reload(
+            {"model_name": "passwords", "model_alias": "prod", "model_version": "12"},
+            {"status": "model_reloaded"},
+            training_df,
+        )
+
+
 def test_verify_serving_after_reload_checks_configured_replica_state_urls(monkeypatch):
     monkeypatch.setenv("SERVICE_RELOAD_URL", "https://service.example/reload_model")
     monkeypatch.setenv(
@@ -303,6 +368,9 @@ def test_verify_serving_after_reload_checks_configured_replica_state_urls(monkey
         "https://replica-a.example/model_state,https://replica-b.example/model_state",
     )
     calls = []
+    training_df = pipeline_pd.DataFrame(
+        {"Password": ["alpha", "beta"], "Times": [9.0, 99.0]}
+    )
 
     def fake_request(method, url, timeout, **kwargs):
         calls.append(url)
@@ -327,6 +395,7 @@ def test_verify_serving_after_reload_checks_configured_replica_state_urls(monkey
     result = verify_serving_after_reload(
         {"model_name": "passwords", "model_alias": "prod", "model_version": "12"},
         {"status": "model_reloaded", "loaded_model_version": "12"},
+        training_df,
     )
 
     assert result["replica_count"] == 2
@@ -343,6 +412,7 @@ def test_verify_serving_after_reload_checks_configured_replica_state_urls(monkey
 def test_verify_serving_after_reload_rejects_stale_loaded_version(monkeypatch):
     monkeypatch.setenv("SERVICE_HEALTH_URL", "https://service.example/health")
     monkeypatch.setenv("SERVICE_PREDICT_URL", "https://service.example/predict")
+    training_df = pipeline_pd.DataFrame({"Password": ["alpha"], "Times": [9.0]})
 
     def fake_request(method, url, timeout, **kwargs):
         assert method == "GET"
@@ -362,6 +432,7 @@ def test_verify_serving_after_reload_rejects_stale_loaded_version(monkeypatch):
         verify_serving_after_reload(
             {"model_name": "passwords", "model_alias": "prod", "model_version": "12"},
             {"status": "model_reloaded"},
+            training_df,
         )
 
 
@@ -1000,8 +1071,10 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
         calls.append(("reload", result))
         return {"status": "model_reloaded", "token": "super-secret"}
 
-    def verify_serving(registration_result, reload_result):
-        calls.append(("verify_serving", registration_result, reload_result))
+    def verify_serving(registration_result, reload_result, serving_training_df):
+        calls.append(
+            ("verify_serving", registration_result, reload_result, serving_training_df)
+        )
         return {
             "status": "verified",
             "loaded_model_version": registration_result["model_version"],
@@ -1061,6 +1134,7 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
         "verify_serving",
         registration_result,
         {"status": "model_reloaded", "token": "super-secret"},
+        training_df,
     )
     assert result["validation_report"] == merged_validation_report
     assert result["reload"] == {"status": "model_reloaded", "token": "super-secret"}
