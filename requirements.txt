@@ -1,2 +1,5 @@
-# CI should use role-specific requirements files.
--r requirements-dev.txt
+# This file is intentionally not a universal production/runtime dependency list.
+# Install the role-specific profile instead:
+#   - requirements-app.txt   for Docker/runtime service dependencies
+#   - requirements-train.txt for training job dependencies
+#   - requirements-dev.txt   for lint/test/local development dependencies

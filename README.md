@@ -84,7 +84,10 @@ mlops-password-frequency-service
 ├── .gitlab-ci.yml
 ├── Dockerfile
 ├── README.md
-├── requirements.txt
+├── requirements.txt              # указатель на профильные requirements-файлы
+├── requirements-app.txt          # Docker/runtime сервиса
+├── requirements-train.txt        # training job
+├── requirements-dev.txt          # lint/test/local development
 ├── .env.example
 ├── app
 │   ├── gitlab_trigger.py
@@ -115,7 +118,13 @@ mlops-password-frequency-service
 
 `Dockerfile` — инструкция по сборке Docker-образа.
 
-`requirements.txt` — зависимости проекта.
+`requirements-app.txt` — зависимости для Docker/runtime сервиса.
+
+`requirements-train.txt` — зависимости для обучающего pipeline.
+
+`requirements-dev.txt` — зависимости для lint/test/local development.
+
+`requirements.txt` — только указатель на профильные requirements-файлы, не универсальный production/runtime список зависимостей.
 
 `.env.example` — шаблон переменных окружения.
 
@@ -528,10 +537,24 @@ Linux / macOS:
 source venv/bin/activate
 ```
 
-### 3. Установить зависимости
+### 3. Установить зависимости нужного профиля
+
+Для запуска HTTP-сервиса локально установите runtime-зависимости сервиса:
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-app.txt
+```
+
+Для запуска обучающего pipeline установите training-зависимости:
+
+```bash
+pip install -r requirements-train.txt
+```
+
+Для разработки, линтинга и тестов установите dev-зависимости:
+
+```bash
+pip install -r requirements-dev.txt
 ```
 
 ### 4. Создать `.env`
