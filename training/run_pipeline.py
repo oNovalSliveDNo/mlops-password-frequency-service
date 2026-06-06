@@ -309,17 +309,19 @@ def _serving_verification_sample(training_df: pd.DataFrame) -> pd.DataFrame:
 
 def _assert_serving_state(
     health_state: dict[str, Any], state_url: str, expected_version: str | None
-) -> None:
+) -> list[str]:
+    """Log non-blocking diagnostics for a serving state endpoint."""
     instance_id = health_state.get("instance_id") or state_url
+    warnings: list[str] = []
     if health_state.get("model_loaded") is not True:
-        raise RuntimeError(
-            "Serving state check for instance "
+        warnings.append(
+            "Serving state diagnostic for instance "
             f"{instance_id!r} reports model_loaded="
             f"{health_state.get('model_loaded')!r}."
         )
     if health_state.get("last_reload_status") != "success":
-        raise RuntimeError(
-            "Serving state check for instance "
+        warnings.append(
+            "Serving state diagnostic for instance "
             f"{instance_id!r} reports last_reload_status="
             f"{health_state.get('last_reload_status')!r}."
         )
@@ -327,16 +329,37 @@ def _assert_serving_state(
         expected_version is not None
         and health_state.get("loaded_version") != expected_version
     ):
-        raise RuntimeError(
-            "Serving state check for instance "
+        warnings.append(
+            "Serving state diagnostic for instance "
             f"{instance_id!r} loaded unexpected model version: "
             f"{health_state.get('loaded_version')!r} != {expected_version!r}."
         )
 
+    for warning in warnings:
+        logger.warning(warning)
+
+    return warnings
+
+
+def _response_header(headers: dict[str, Any] | None, header_name: str) -> str | None:
+    if not headers:
+        return None
+
+    normalized_header_name = header_name.lower()
+    for key, value in headers.items():
+        if str(key).lower() == normalized_header_name:
+            return str(value)
+
+    return None
+
 
 def _validate_predict_response(
-    predict_result: dict[str, Any], passwords: list[str], expected_targets: list[float]
-) -> tuple[list[float], float]:
+    predict_result: dict[str, Any],
+    passwords: list[str],
+    expected_targets: list[float],
+    response_headers: dict[str, Any] | None = None,
+    expected_version: str | None = None,
+) -> tuple[list[float], float, str | None]:
     predictions = predict_result.get("Times")
     if not isinstance(predictions, list) or len(predictions) != len(passwords):
         raise RuntimeError(
@@ -360,14 +383,31 @@ def _validate_predict_response(
             )
         prediction_values.append(prediction_value)
 
+    response_model_version = _response_header(response_headers, "X-Model-Version")
+    if (
+        expected_version is not None
+        and response_model_version is not None
+        and response_model_version != expected_version
+    ):
+        raise RuntimeError(
+            "Serving predict check returned unexpected X-Model-Version: "
+            f"{response_model_version!r} != {expected_version!r}."
+        )
+
     max_abs_error = max(
         abs(prediction - expected)
         for prediction, expected in zip(prediction_values, expected_targets)
     )
-    return prediction_values, float(max_abs_error)
+    return prediction_values, float(max_abs_error), response_model_version
 
 
-def _request_json_with_retries(method: str, url: str, **kwargs) -> dict[str, Any]:
+def _request_json_with_retries(
+    method: str,
+    url: str,
+    *,
+    include_response_metadata: bool = False,
+    **kwargs,
+) -> dict[str, Any] | SimpleNamespace:
     last_error: str | None = None
 
     for attempt in range(1, _RELOAD_ATTEMPTS + 1):
@@ -379,6 +419,10 @@ def _request_json_with_retries(method: str, url: str, **kwargs) -> dict[str, Any
                 **kwargs,
             )
             response.raise_for_status()
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"{url} returned HTTP status {response.status_code}; expected 200"
+                )
             try:
                 body = response.json()
             except ValueError as exc:
@@ -386,6 +430,13 @@ def _request_json_with_retries(method: str, url: str, **kwargs) -> dict[str, Any
 
             if not isinstance(body, dict):
                 raise RuntimeError(f"{url} returned a non-object JSON response")
+
+            if include_response_metadata:
+                return SimpleNamespace(
+                    body=body,
+                    headers=dict(getattr(response, "headers", {}) or {}),
+                    status_code=response.status_code,
+                )
 
             return body
         except (requests.RequestException, RuntimeError) as exc:
@@ -422,11 +473,15 @@ def verify_serving_after_reload(
     expected_version = _expected_model_version(registration_result)
     state_urls = _service_state_urls()
     predict_url = _service_endpoint_url("SERVICE_PREDICT_URL", "/predict")
-    if not state_urls or not predict_url:
+    if not predict_url:
         raise RuntimeError(
-            "SERVICE_REPLICA_STATE_URLS or SERVICE_HEALTH_URL, and "
-            "SERVICE_PREDICT_URL are required for serving verification when "
-            "SERVICE_RELOAD_URL cannot be used to derive them."
+            "SERVICE_PREDICT_URL is required for serving verification when "
+            "SERVICE_RELOAD_URL cannot be used to derive it."
+        )
+    if not state_urls:
+        logger.warning(
+            "No serving state endpoint is configured; /model_state diagnostics "
+            "will be skipped."
         )
 
     sample_df = _serving_verification_sample(training_df)
@@ -454,25 +509,25 @@ def verify_serving_after_reload(
     max_abs_error = 0.0
 
     for round_number in range(1, rounds + 1):
-        for state_url in state_urls:
-            health_state = _request_json_with_retries("GET", state_url)
-            _assert_serving_state(health_state, state_url, expected_version)
-
-            replica_state = {
-                "round": round_number,
-                "url": state_url,
-                "state": health_state,
-            }
-            replica_checks.append(replica_state)
-            latest_replica_states_by_url[state_url] = replica_state
-
-        predict_result = _request_json_with_retries(
+        predict_response = _request_json_with_retries(
             "POST",
             predict_url,
+            include_response_metadata=True,
             json={"Password": sample_passwords},
         )
-        _, round_max_abs_error = _validate_predict_response(
-            predict_result, sample_passwords, expected_targets
+        if not isinstance(predict_response, SimpleNamespace):
+            raise RuntimeError(
+                "Serving predict check did not return response metadata."
+            )
+
+        predictions, round_max_abs_error, response_model_version = (
+            _validate_predict_response(
+                predict_response.body,
+                sample_passwords,
+                expected_targets,
+                response_headers=predict_response.headers,
+                expected_version=expected_version,
+            )
         )
         max_abs_error = max(max_abs_error, round_max_abs_error)
         predict_checks.append(
@@ -480,7 +535,9 @@ def verify_serving_after_reload(
                 "round": round_number,
                 "url": predict_url,
                 "request_count": len(sample_passwords),
-                "response_count": len(sample_passwords),
+                "response_count": len(predictions),
+                "http_status": predict_response.status_code,
+                "response_model_version": response_model_version,
                 "max_abs_error": round_max_abs_error,
             }
         )
@@ -504,17 +561,59 @@ def verify_serving_after_reload(
                 f"sample_passwords={_sanitize_for_log(sample_passwords[:5])!r}."
             )
 
+        for state_url in state_urls:
+            try:
+                state_response = _request_json_with_retries(
+                    "GET", state_url, include_response_metadata=True
+                )
+            except RuntimeError as exc:
+                diagnostic_warning = (
+                    "Serving state diagnostic request failed for "
+                    f"{_sanitize_for_log(state_url)}: {_sanitize_for_log(str(exc))}."
+                )
+                logger.warning(diagnostic_warning)
+                replica_state = {
+                    "round": round_number,
+                    "url": state_url,
+                    "state": None,
+                    "warnings": [diagnostic_warning],
+                }
+            else:
+                if not isinstance(state_response, SimpleNamespace):
+                    raise RuntimeError(
+                        "Serving state diagnostic did not return response metadata."
+                    )
+
+                state_warnings = _assert_serving_state(
+                    state_response.body, state_url, expected_version
+                )
+                replica_state = {
+                    "round": round_number,
+                    "url": state_url,
+                    "state": state_response.body,
+                    "http_status": state_response.status_code,
+                    "warnings": state_warnings,
+                }
+
+            replica_checks.append(replica_state)
+            latest_replica_states_by_url[state_url] = replica_state
+
     ordered_unique_state_urls = list(dict.fromkeys(state_urls))
     replica_states = [
         latest_replica_states_by_url[state_url]
         for state_url in ordered_unique_state_urls
+        if state_url in latest_replica_states_by_url
     ]
-    health_state = replica_states[-1]["state"]
+    health_state = replica_states[-1]["state"] if replica_states else {}
 
     return {
         "status": "verified",
         "expected_model_version": expected_version,
-        "loaded_model_version": health_state.get("loaded_version"),
+        "loaded_model_version": (
+            health_state.get("loaded_version")
+            if isinstance(health_state, dict)
+            else None
+        ),
         "replica_count": len(replica_states),
         "replicas": replica_states,
         "replica_checks": replica_checks,

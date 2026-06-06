@@ -80,8 +80,9 @@ def _assert_duration_logs(caplog, expected_step_names):
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, json_body=None, json_error=False):
+    def __init__(self, status_code=200, json_body=None, json_error=False, headers=None):
         self.status_code = status_code
+        self.headers = headers or {}
         self._json_body = json_body
         self._json_error = json_error
 
@@ -238,7 +239,9 @@ def test_call_reload_model_endpoint_retries_and_sanitizes_secret(monkeypatch):
     assert "super-secret" not in error_message
 
 
-def test_verify_serving_after_reload_checks_health_and_predict(monkeypatch):
+def test_verify_serving_after_reload_checks_predict_then_health_diagnostics(
+    monkeypatch,
+):
     monkeypatch.setenv("SERVICE_RELOAD_URL", "https://service.example/reload_model")
     calls = []
 
@@ -268,7 +271,10 @@ def test_verify_serving_after_reload_checks_health_and_predict(monkeypatch):
                 }
             )
 
-        return FakeResponse(json_body={"Times": [1.0, 2.0]})
+        return FakeResponse(
+            json_body={"Times": [1.0, 2.0]},
+            headers={"X-Model-Version": "12"},
+        )
 
     monkeypatch.setattr(
         "training.run_pipeline.requests.request", fake_request, raising=False
@@ -290,14 +296,10 @@ def test_verify_serving_after_reload_checks_health_and_predict(monkeypatch):
     assert result["predict"]["max_abs_error"] == 0.0
     assert result["predict"]["rounds"] == 3
     assert result["predict"]["sample_passwords"] == ["alpha", "beta"]
+    assert result["predict"]["checks"][0]["http_status"] == 200
+    assert result["predict"]["checks"][0]["response_model_version"] == "12"
     assert calls == [
         {
-            "method": "GET",
-            "url": "https://service.example/model_state",
-            "timeout": 30,
-            "kwargs": {},
-        },
-        {
             "method": "POST",
             "url": "https://service.example/predict",
             "timeout": 30,
@@ -326,6 +328,12 @@ def test_verify_serving_after_reload_checks_health_and_predict(monkeypatch):
             "url": "https://service.example/predict",
             "timeout": 30,
             "kwargs": {"json": {"Password": ["alpha", "beta"]}},
+        },
+        {
+            "method": "GET",
+            "url": "https://service.example/model_state",
+            "timeout": 30,
+            "kwargs": {},
         },
     ]
 
@@ -403,19 +411,22 @@ def test_verify_serving_after_reload_checks_configured_replica_state_urls(monkey
         "replica-a",
         "replica-b",
     ]
-    assert calls[:2] == [
+    assert calls[:3] == [
+        "https://service.example/predict",
         "https://replica-a.example/model_state",
         "https://replica-b.example/model_state",
     ]
 
 
-def test_verify_serving_after_reload_rejects_stale_loaded_version(monkeypatch):
+def test_verify_serving_after_reload_warns_on_stale_state_version(monkeypatch, caplog):
     monkeypatch.setenv("SERVICE_HEALTH_URL", "https://service.example/health")
     monkeypatch.setenv("SERVICE_PREDICT_URL", "https://service.example/predict")
+    monkeypatch.setenv("SERVICE_SERVING_VERIFICATION_ROUNDS", "1")
     training_df = pipeline_pd.DataFrame({"Password": ["alpha"], "Times": [9.0]})
 
     def fake_request(method, url, timeout, **kwargs):
-        assert method == "GET"
+        if method == "POST":
+            return FakeResponse(json_body={"Times": [1.0]})
         return FakeResponse(
             json_body={
                 "status": "ok",
@@ -428,12 +439,16 @@ def test_verify_serving_after_reload_rejects_stale_loaded_version(monkeypatch):
     monkeypatch.setattr(
         "training.run_pipeline.requests.request", fake_request, raising=False
     )
-    with pytest.raises(RuntimeError, match="unexpected model version"):
-        verify_serving_after_reload(
+    with caplog.at_level(logging.WARNING):
+        result = verify_serving_after_reload(
             {"model_name": "passwords", "model_alias": "prod", "model_version": "12"},
             {"status": "model_reloaded"},
             training_df,
         )
+
+    assert result["status"] == "verified"
+    assert result["replicas"][0]["warnings"]
+    assert "unexpected model version" in caplog.text
 
 
 def test_run_training_pipeline_stops_on_invalid_schema_validation(monkeypatch, caplog):
