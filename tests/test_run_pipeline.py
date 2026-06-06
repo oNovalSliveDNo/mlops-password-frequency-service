@@ -1334,6 +1334,150 @@ def test_two_valid_datasets_create_versions_and_move_prod_alias(monkeypatch):
     )
 
 
+def _stub_successful_pipeline_until_serving_verification(
+    monkeypatch, training_df=None, calls=None
+):
+    if training_df is None:
+        training_df = FakeDataFrame(
+            {"Password": ["alpha", "beta"], "Times": [10, 20], "source_row": [1, 2]}
+        )
+    if calls is None:
+        calls = []
+
+    monkeypatch.setenv("DATA_URL", "https://example.com/data.csv")
+    monkeypatch.setattr(
+        "training.run_pipeline.download_data",
+        lambda data_url, output_path: "downloaded.csv",
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_data_file",
+        lambda input_path, report_path: SimpleNamespace(
+            is_valid=True,
+            errors=[],
+            n_rows=len(training_df.index),
+            columns=["Password", "Times"],
+            metrics={"row_count": len(training_df.index)},
+            cleaned_df=training_df,
+        ),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_model_quality_with_prod_model",
+        lambda df: ModelQualityValidationResult(
+            True, [], {"rmse": 0.1, "mae": 0.05}, scored_df=df
+        ),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.run_evidently_tests",
+        lambda df, output_path: {"status": "success"},
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.train_password_model",
+        lambda df: ("model", {"n_rows": len(df.index)}),
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.save_model_artifact",
+        lambda model, output_path: "artifacts/model.joblib",
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.register_model_in_mlflow",
+        lambda model, metrics, validation_report=None, model_alias=None: {
+            "model_name": "passwords",
+            "model_alias": model_alias,
+            "model_version": "1",
+            "model_uri": "models:/passwords/1",
+            "alias_verified": True,
+            "verified_model_version": "1",
+        },
+    )
+
+    def reload_model(registration_result=None):
+        calls.append(("reload", registration_result))
+        return {"status": "model_reloaded"}
+
+    monkeypatch.setattr(
+        "training.run_pipeline.call_reload_model_endpoint", reload_model
+    )
+    return calls
+
+
+def test_run_training_pipeline_warns_when_serving_verification_fails_by_default(
+    monkeypatch, caplog
+):
+    from training.run_pipeline import run_training_pipeline
+
+    calls = _stub_successful_pipeline_until_serving_verification(monkeypatch)
+    monkeypatch.delenv("FAIL_CI_ON_SERVING_VERIFICATION_FAILED", raising=False)
+    monkeypatch.setenv("SERVICE_RELOAD_SECRET", "super-secret")
+
+    def verify_serving(registration_result, reload_result, training_df):
+        calls.append(
+            ("verify_serving", registration_result, reload_result, training_df)
+        )
+        raise RuntimeError("loaded version is stale for super-secret")
+
+    monkeypatch.setattr(
+        "training.run_pipeline.verify_serving_after_reload", verify_serving
+    )
+
+    with caplog.at_level(logging.INFO):
+        result = run_training_pipeline()
+
+    assert [call[0] for call in calls] == ["reload", "verify_serving"]
+    assert result["status"] == "success_with_serving_verification_warning"
+    assert result["reload"] == {"status": "model_reloaded"}
+    assert result["serving_verification"] == {
+        "status": "warning",
+        "reason": "serving verification failed after reload",
+        "error_type": "RuntimeError",
+        "error": "loaded version is stale for [REDACTED]",
+    }
+    assert (
+        "serving verification failed after service reload; continuing because "
+        "FAIL_CI_ON_SERVING_VERIFICATION_FAILED is not enabled" in caplog.text
+    )
+    assert "super-secret" not in caplog.text
+    _assert_duration_logs(
+        caplog,
+        [
+            "data download",
+            "schema validation",
+            "training",
+            "model-quality validation",
+            "Evidently",
+            "MLflow registration",
+            "alias verification",
+            "model artifact saving",
+            "service reload",
+            "serving verification",
+            "total pipeline",
+        ],
+    )
+
+
+def test_run_training_pipeline_raises_when_serving_verification_strict_flag_enabled(
+    monkeypatch,
+):
+    from training.run_pipeline import run_training_pipeline
+
+    calls = _stub_successful_pipeline_until_serving_verification(monkeypatch)
+    monkeypatch.setenv("FAIL_CI_ON_SERVING_VERIFICATION_FAILED", "true")
+
+    def verify_serving(registration_result, reload_result, training_df):
+        calls.append(
+            ("verify_serving", registration_result, reload_result, training_df)
+        )
+        raise RuntimeError("loaded version is stale")
+
+    monkeypatch.setattr(
+        "training.run_pipeline.verify_serving_after_reload", verify_serving
+    )
+
+    with pytest.raises(RuntimeError, match="loaded version is stale"):
+        run_training_pipeline()
+
+    assert [call[0] for call in calls] == ["reload", "verify_serving"]
+
+
 def test_run_training_pipeline_requires_reload_url_in_ci_after_registration(
     monkeypatch,
 ):

@@ -25,6 +25,7 @@ _DEFAULT_MODEL_ARTIFACT_PATH = "artifacts/model.joblib"
 _DEFAULT_VALIDATION_REPORT_PATH = "validation_reports/validation_report.json"
 _DEFAULT_EVIDENTLY_REPORT_PATH = "reports/tests.json"
 _PRODUCTION_MODEL_ALIAS = "prod"
+_FAIL_CI_ON_SERVING_VERIFICATION_FAILED_ENV = "FAIL_CI_ON_SERVING_VERIFICATION_FAILED"
 
 
 logger = logging.getLogger(__name__)
@@ -853,13 +854,32 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
         logger.info(
             "service reload response received: %s", _sanitize_for_log(reload_result)
         )
-        serving_verification = _timed_step(
-            "serving verification",
-            verify_serving_after_reload,
-            registration_result,
-            reload_result,
-            training_df,
-        )
+        try:
+            serving_verification = _timed_step(
+                "serving verification",
+                verify_serving_after_reload,
+                registration_result,
+                reload_result,
+                training_df,
+            )
+            pipeline_status = "success"
+        except Exception as exc:
+            if _env_flag_is_true(_FAIL_CI_ON_SERVING_VERIFICATION_FAILED_ENV):
+                raise
+
+            serving_verification = {
+                "status": "warning",
+                "reason": "serving verification failed after reload",
+                "error_type": type(exc).__name__,
+                "error": str(_sanitize_for_log(str(exc))),
+            }
+            pipeline_status = "success_with_serving_verification_warning"
+            logger.warning(
+                "serving verification failed after service reload; continuing "
+                "because %s is not enabled: %s",
+                _FAIL_CI_ON_SERVING_VERIFICATION_FAILED_ENV,
+                _sanitize_for_log(str(exc)),
+            )
         logger.info(
             "service state checked: %s", _sanitize_for_log(serving_verification)
         )
@@ -868,7 +888,7 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
             _sanitize_for_log(serving_verification.get("loaded_model_version")),
         )
         return {
-            "status": "success",
+            "status": pipeline_status,
             "data_path": data_path,
             "evidently_report": evidently_report,
             "validation_report": validation_report,
