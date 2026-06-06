@@ -202,25 +202,40 @@ curl -X POST "https://your-amvera-service.amvera.ru/trigger" \
 
 ### 3. Диагностика модели
 
-`GET /health`
+Сервис использует **lazy loading**: модель загружается при первом `POST /predict` или при явном `POST /reload_model`. Поэтому liveness и readiness разделены.
+
+`GET /health` — liveness endpoint. Он показывает, что FastAPI-процесс жив, и не пытается обращаться к MLflow/S3. Даже если модель ещё не загружена или последняя загрузка завершилась ошибкой, endpoint возвращает `200 OK`.
+
+`GET /ready` — readiness endpoint. Он возвращает `200 OK` только когда модель уже есть в памяти (`model_loaded=true`). Если модель ещё не загружена или последняя попытка загрузки завершилась ошибкой и рабочей модели в памяти нет, endpoint возвращает `503 Service Unavailable`.
+
 `GET /model_state`
 `GET /model_status`
 
-Возвращают текущий статус сервиса и метаданные загруженной модели.
+Возвращают read-only диагностические метаданные модели. `/model_status` является alias для `/model_state` и возвращает тот же диагностический payload.
 
-`/model_status` является read-only alias для `/model_state` и возвращает тот же диагностический payload.
+#### Какой endpoint использовать
 
-#### Пример запроса
+* Для liveness-probe платформы деплоя используйте `GET /health`.
+* Для readiness-probe, балансировщика или проверки готовности принимать ML-запросы используйте `GET /ready`.
+* Для ручной диагностики версии модели используйте `GET /model_status` или `GET /model_state`.
+
+#### Пример liveness-запроса
 
 ```bash
-curl -X GET "https://your-amvera-service.amvera.ru/model_status"
+curl -X GET "https://your-amvera-service.amvera.ru/health"
 ```
 
-#### Пример ответа
+#### Пример readiness-запроса
+
+```bash
+curl -X GET "https://your-amvera-service.amvera.ru/ready"
+```
+
+#### Пример readiness-ответа, когда модель загружена
 
 ```json
 {
-  "status": "ok",
+  "status": "ready",
   "model_loaded": true,
   "model_name": "passwords",
   "model_alias": "prod",
@@ -228,6 +243,24 @@ curl -X GET "https://your-amvera-service.amvera.ru/model_status"
   "model_uri": "models:/passwords@prod",
   "loaded_at": "2026-06-05T00:00:00+00:00",
   "last_reload_status": "success",
+  "last_reload_error": null
+}
+```
+
+#### Пример readiness-ответа, когда модель ещё не загружена
+
+HTTP status: `503 Service Unavailable`
+
+```json
+{
+  "status": "not_ready",
+  "model_loaded": false,
+  "model_name": null,
+  "model_alias": null,
+  "loaded_version": null,
+  "model_uri": null,
+  "loaded_at": null,
+  "last_reload_status": "not_loaded",
   "last_reload_error": null
 }
 ```

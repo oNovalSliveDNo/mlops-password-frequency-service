@@ -294,3 +294,108 @@ def test_health_last_reload_error_uses_safe_category(monkeypatch):
     assert response.json()["last_reload_status"] == "failed"
     assert response.json()["last_reload_error"] == "model_reload_failed:RuntimeError"
     assert secret not in response.text
+
+
+def test_health_is_liveness_when_model_not_loaded(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "get_model_state",
+        lambda: ModelServiceState(
+            model_loaded=False,
+            model_name=None,
+            model_alias=None,
+            loaded_version=None,
+            model_uri=None,
+            loaded_at=None,
+            last_reload_status="not_loaded",
+            last_reload_error=None,
+        ),
+    )
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert response.json()["model_loaded"] is False
+    assert response.json()["last_reload_status"] == "not_loaded"
+
+
+def test_ready_returns_503_when_model_not_loaded(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "get_model_state",
+        lambda: ModelServiceState(
+            model_loaded=False,
+            model_name=None,
+            model_alias=None,
+            loaded_version=None,
+            model_uri=None,
+            loaded_at=None,
+            last_reload_status="not_loaded",
+            last_reload_error=None,
+        ),
+    )
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "not_ready"
+    assert response.json()["model_loaded"] is False
+    assert response.json()["last_reload_status"] == "not_loaded"
+
+
+def test_ready_returns_200_when_model_loaded(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "get_model_state",
+        lambda: ModelServiceState(
+            model_loaded=True,
+            model_name="passwords",
+            model_alias="prod",
+            loaded_version="14",
+            model_uri="models:/passwords/14",
+            loaded_at="2026-06-06T00:00:00+00:00",
+            last_reload_status="success",
+            last_reload_error=None,
+        ),
+    )
+
+    response = client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ready",
+        "model_loaded": True,
+        "model_name": "passwords",
+        "model_alias": "prod",
+        "loaded_version": "14",
+        "model_uri": "models:/passwords/14",
+        "loaded_at": "2026-06-06T00:00:00+00:00",
+        "last_reload_status": "success",
+        "last_reload_error": None,
+    }
+
+
+def test_ready_returns_503_after_last_load_failure(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "get_model_state",
+        lambda: ModelServiceState(
+            model_loaded=False,
+            model_name=None,
+            model_alias=None,
+            loaded_version=None,
+            model_uri=None,
+            loaded_at=None,
+            last_reload_status="failed",
+            last_reload_error="model_reload_failed:RuntimeError",
+        ),
+    )
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "not_ready"
+    assert response.json()["model_loaded"] is False
+    assert response.json()["last_reload_status"] == "failed"
+    assert response.json()["last_reload_error"] == "model_reload_failed:RuntimeError"

@@ -70,3 +70,7 @@ class HealthResponse(BaseModel):
     loaded_at: str | None = None
     last_reload_status: str
     last_reload_error: str | None = None
+
+
+class ReadinessResponse(HealthResponse):
+    """Readiness probe response with model availability diagnostics."""

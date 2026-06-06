@@ -11,11 +11,17 @@ from app.schemas import (
     HealthResponse,
     PredictRequest,
     PredictResponse,
+    ReadinessResponse,
     ReloadRequest,
     ReloadResponse,
     TriggerRequest,
     TriggerResponse,
 )
+
+# The service intentionally uses lazy model loading: the MLflow model is
+# loaded by get_model() on the first prediction or by an explicit reload request.
+# /health is therefore a liveness probe and /ready is the readiness probe.
+MODEL_LOADING_MODE = "lazy"
 
 app = FastAPI(title="Password Frequency Service")
 logger = logging.getLogger(__name__)
@@ -94,9 +100,33 @@ def _current_health_response() -> HealthResponse:
     )
 
 
+def _current_readiness_response() -> ReadinessResponse:
+    model_state = get_model_state()
+    return ReadinessResponse(
+        status="ready" if model_state.model_loaded else "not_ready",
+        model_loaded=model_state.model_loaded,
+        model_name=model_state.model_name,
+        model_alias=model_state.model_alias,
+        loaded_version=model_state.loaded_version,
+        model_uri=model_state.model_uri,
+        loaded_at=model_state.loaded_at,
+        last_reload_status=model_state.last_reload_status,
+        last_reload_error=model_state.last_reload_error,
+    )
+
+
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     return _current_health_response()
+
+
+@app.get("/ready", response_model=ReadinessResponse)
+def ready(response: Response) -> ReadinessResponse:
+    readiness_response = _current_readiness_response()
+    if not readiness_response.model_loaded:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+
+    return readiness_response
 
 
 @app.get("/model_state", response_model=HealthResponse)
