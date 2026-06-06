@@ -63,6 +63,17 @@ class FakeTrainingFrame:
         return self
 
 
+def _assert_duration_logs(caplog, expected_step_names):
+    duration_records = [
+        record for record in caplog.records if record.msg == "%s took %.3f sec"
+    ]
+    actual_step_names = [record.args[0] for record in duration_records]
+    assert actual_step_names == expected_step_names
+    for record in duration_records:
+        assert isinstance(record.args[1], float)
+        assert record.args[1] >= 0
+
+
 class FakeResponse:
     def __init__(self, status_code=200, json_body=None, json_error=False):
         self.status_code = status_code
@@ -372,6 +383,9 @@ def test_run_training_pipeline_stops_on_invalid_schema_validation(monkeypatch, c
     }
     assert "data downloaded: downloaded.csv" in caplog.text
     assert "validation failed: bad data" in caplog.text
+    _assert_duration_logs(
+        caplog, ["data download", "schema validation", "total pipeline"]
+    )
     assert calls == []
 
 
@@ -475,6 +489,15 @@ def test_run_training_pipeline_stops_on_failed_model_quality(
     assert written_report["model_quality_metrics"] == model_quality_metrics
     assert (
         "model quality validation failed: rmse too high for token abc123" in caplog.text
+    )
+    _assert_duration_logs(
+        caplog,
+        [
+            "data download",
+            "schema validation",
+            "model-quality validation",
+            "total pipeline",
+        ],
     )
     assert calls == []
 
@@ -967,6 +990,22 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
         in caplog.text
     )
     assert "super-secret" not in caplog.text
+    _assert_duration_logs(
+        caplog,
+        [
+            "data download",
+            "schema validation",
+            "model-quality validation",
+            "Evidently",
+            "training",
+            "model artifact saving",
+            "MLflow registration",
+            "alias verification",
+            "service reload",
+            "serving verification",
+            "total pipeline",
+        ],
+    )
 
 
 def test_run_training_pipeline_requires_reload_url_in_ci_after_registration(

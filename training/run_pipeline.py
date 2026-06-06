@@ -57,6 +57,15 @@ def _sanitize_for_log(value: Any) -> Any:
     return value
 
 
+def _timed_step(step_name: str, step_callable, *args, **kwargs):
+    """Run a pipeline step and log its elapsed wall-clock duration."""
+    started_at = time.monotonic()
+    try:
+        return step_callable(*args, **kwargs)
+    finally:
+        logger.info("%s took %.3f sec", step_name, time.monotonic() - started_at)
+
+
 def download_data(data_url: str, output_path: str) -> str:
     from training.download_data import download_data as download_data_impl
 
@@ -463,103 +472,147 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
     explicit read-back verification that the production alias points to the new
     model version.
     """
-    resolved_data_url = data_url or os.getenv("DATA_URL")
-    if not resolved_data_url:
-        raise ValueError("DATA_URL environment variable is required.")
+    pipeline_started_at = time.monotonic()
+    try:
+        resolved_data_url = data_url or os.getenv("DATA_URL")
+        if not resolved_data_url:
+            raise ValueError("DATA_URL environment variable is required.")
 
-    Path("artifacts").mkdir(parents=True, exist_ok=True)
-    Path("reports").mkdir(parents=True, exist_ok=True)
-    Path("validation_reports").mkdir(parents=True, exist_ok=True)
+        Path("artifacts").mkdir(parents=True, exist_ok=True)
+        Path("reports").mkdir(parents=True, exist_ok=True)
+        Path("validation_reports").mkdir(parents=True, exist_ok=True)
 
-    data_path = download_data(resolved_data_url, _DEFAULT_DATA_PATH)
-    logger.info("data downloaded: %s", _sanitize_for_log(data_path))
-    schema_result = validate_data_file(data_path, _DEFAULT_VALIDATION_REPORT_PATH)
-    validation_report = _validation_report_dict(schema_result)
-    if not schema_result.is_valid:
-        errors = schema_result.errors
-        error_message = "; ".join(errors) or "unknown validation error"
-        logger.info("validation failed: %s", _sanitize_for_log(error_message))
-        return {
-            "status": "validation_failed",
-            "data_path": data_path,
-            "validation_report": validation_report,
-            "errors": errors,
-        }
+        data_path = _timed_step(
+            "data download", download_data, resolved_data_url, _DEFAULT_DATA_PATH
+        )
+        logger.info("data downloaded: %s", _sanitize_for_log(data_path))
+        schema_result = _timed_step(
+            "schema validation",
+            validate_data_file,
+            data_path,
+            _DEFAULT_VALIDATION_REPORT_PATH,
+        )
+        validation_report = _validation_report_dict(schema_result)
+        if not schema_result.is_valid:
+            errors = schema_result.errors
+            error_message = "; ".join(errors) or "unknown validation error"
+            logger.info("validation failed: %s", _sanitize_for_log(error_message))
+            return {
+                "status": "validation_failed",
+                "data_path": data_path,
+                "validation_report": validation_report,
+                "errors": errors,
+            }
 
-    logger.info("validation passed")
+        logger.info("validation passed")
 
-    if hasattr(schema_result, "cleaned_df"):
-        training_df = schema_result.cleaned_df
-        if training_df is None:
-            raise RuntimeError(
-                "Data validation succeeded but cleaned data is missing; "
-                "this indicates an internal validation error."
+        if hasattr(schema_result, "cleaned_df"):
+            training_df = schema_result.cleaned_df
+            if training_df is None:
+                raise RuntimeError(
+                    "Data validation succeeded but cleaned data is missing; "
+                    "this indicates an internal validation error."
+                )
+        else:
+            # Backward-compatible path for tests or external callers that provide
+            # ValidationResult-like objects without the new cleaned_df field.
+            training_df = _read_validated_training_dataframe(data_path)
+
+        model_quality_result = _timed_step(
+            "model-quality validation",
+            validate_model_quality_with_prod_model,
+            training_df,
+        )
+        validation_report = _merged_validation_report_dict(
+            schema_result, model_quality_result
+        )
+        _write_validation_report(validation_report, _DEFAULT_VALIDATION_REPORT_PATH)
+
+        if not model_quality_result.is_valid:
+            errors = validation_report["errors"]
+            error_message = (
+                "; ".join(errors) or "unknown model quality validation error"
             )
-    else:
-        # Backward-compatible path for tests or external callers that provide
-        # ValidationResult-like objects without the new cleaned_df field.
-        training_df = _read_validated_training_dataframe(data_path)
+            logger.info(
+                "model quality validation failed: %s",
+                _sanitize_for_log(error_message),
+            )
+            return {
+                "status": "validation_failed",
+                "data_path": data_path,
+                "validation_report": validation_report,
+                "errors": errors,
+            }
 
-    model_quality_result = validate_model_quality_with_prod_model(training_df)
-    validation_report = _merged_validation_report_dict(
-        schema_result, model_quality_result
-    )
-    _write_validation_report(validation_report, _DEFAULT_VALIDATION_REPORT_PATH)
+        evidently_input_df = getattr(model_quality_result, "scored_df", None)
+        if evidently_input_df is None:
+            evidently_input_df = training_df
+        evidently_report = _timed_step(
+            "Evidently",
+            _run_non_blocking_evidently_tests,
+            evidently_input_df,
+            _DEFAULT_EVIDENTLY_REPORT_PATH,
+        )
+        model, metrics = _timed_step(
+            "training", train_password_model, training_df[["Password", "Times"]]
+        )
+        logger.info("model trained")
+        model_artifact_path = _timed_step(
+            "model artifact saving",
+            save_model_artifact,
+            model,
+            _DEFAULT_MODEL_ARTIFACT_PATH,
+        )
 
-    if not model_quality_result.is_valid:
-        errors = validation_report["errors"]
-        error_message = "; ".join(errors) or "unknown model quality validation error"
+        registration_result = _timed_step(
+            "MLflow registration",
+            register_model_in_mlflow,
+            model,
+            metrics,
+            validation_report=validation_report,
+            model_alias=_PRODUCTION_MODEL_ALIAS,
+        )
+        logger.info("model registered: %s", _sanitize_for_log(registration_result))
+        _timed_step(
+            "alias verification",
+            _ensure_registration_alias_verified,
+            registration_result,
+        )
+        logger.info("model alias verified: %s", _sanitize_for_log(registration_result))
+        reload_result = _timed_step(
+            "service reload", call_reload_model_endpoint, registration_result
+        )
         logger.info(
-            "model quality validation failed: %s", _sanitize_for_log(error_message)
+            "service reload response received: %s", _sanitize_for_log(reload_result)
+        )
+        serving_verification = _timed_step(
+            "serving verification",
+            verify_serving_after_reload,
+            registration_result,
+            reload_result,
+        )
+        logger.info(
+            "service state checked: %s", _sanitize_for_log(serving_verification)
+        )
+        logger.info(
+            "service loaded model version: %s",
+            _sanitize_for_log(serving_verification.get("loaded_model_version")),
         )
         return {
-            "status": "validation_failed",
             "data_path": data_path,
+            "evidently_report": evidently_report,
             "validation_report": validation_report,
-            "errors": errors,
+            "model_artifact_path": model_artifact_path,
+            "registration": registration_result,
+            "reload": reload_result,
+            "serving_verification": serving_verification,
         }
-
-    evidently_input_df = getattr(model_quality_result, "scored_df", None)
-    if evidently_input_df is None:
-        evidently_input_df = training_df
-    evidently_report = _run_non_blocking_evidently_tests(
-        evidently_input_df, _DEFAULT_EVIDENTLY_REPORT_PATH
-    )
-    model, metrics = train_password_model(training_df[["Password", "Times"]])
-    logger.info("model trained")
-    model_artifact_path = save_model_artifact(model, _DEFAULT_MODEL_ARTIFACT_PATH)
-
-    registration_result = register_model_in_mlflow(
-        model,
-        metrics,
-        validation_report=validation_report,
-        model_alias=_PRODUCTION_MODEL_ALIAS,
-    )
-    logger.info("model registered: %s", _sanitize_for_log(registration_result))
-    _ensure_registration_alias_verified(registration_result)
-    logger.info("model alias verified: %s", _sanitize_for_log(registration_result))
-    reload_result = call_reload_model_endpoint(registration_result)
-    logger.info(
-        "service reload response received: %s", _sanitize_for_log(reload_result)
-    )
-    serving_verification = verify_serving_after_reload(
-        registration_result, reload_result
-    )
-    logger.info("service state checked: %s", _sanitize_for_log(serving_verification))
-    logger.info(
-        "service loaded model version: %s",
-        _sanitize_for_log(serving_verification.get("loaded_model_version")),
-    )
-
-    return {
-        "data_path": data_path,
-        "evidently_report": evidently_report,
-        "validation_report": validation_report,
-        "model_artifact_path": model_artifact_path,
-        "registration": registration_result,
-        "reload": reload_result,
-        "serving_verification": serving_verification,
-    }
+    finally:
+        logger.info(
+            "%s took %.3f sec",
+            "total pipeline",
+            time.monotonic() - pipeline_started_at,
+        )
 
 
 def main() -> None:
