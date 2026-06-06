@@ -87,7 +87,7 @@ def get_current_model_alias_version(
 
 
 def _get_alias_version_cache_ttl_seconds() -> float:
-    value = os.getenv("MODEL_ALIAS_CHECK_TTL_SECONDS", "0")
+    value = os.getenv("MODEL_ALIAS_CHECK_TTL_SECONDS", "1")
     try:
         ttl_seconds = float(value)
     except ValueError:
@@ -98,6 +98,10 @@ def _get_alias_version_cache_ttl_seconds() -> float:
 
 def _read_model_alias_version(model_name: str, model_alias: str) -> str | None:
     return get_current_model_alias_version(model_name, model_alias)
+
+
+def _load_mlflow_pyfunc_model(model_uri: str) -> object:
+    return mlflow.pyfunc.load_model(model_uri)
 
 
 def load_model_from_mlflow(
@@ -112,7 +116,7 @@ def load_model_from_mlflow(
     )
     model_uri = get_model_uri(requested_model_version)
 
-    model = mlflow.pyfunc.load_model(model_uri)
+    model = _load_mlflow_pyfunc_model(model_uri)
     loaded_model_version = requested_model_version
     if loaded_model_version is None:
         loaded_model_version = _read_model_alias_version(model_name, model_alias)

@@ -24,16 +24,51 @@ def test_get_current_model_alias_version_reads_mlflow_alias(monkeypatch):
     assert calls == [("passwords", "prod")]
 
 
-def test_alias_version_cache_ttl_defaults_to_zero(monkeypatch):
+def test_alias_version_cache_ttl_defaults_to_one_second(monkeypatch):
     monkeypatch.delenv("MODEL_ALIAS_CHECK_TTL_SECONDS", raising=False)
 
-    assert model_loader._get_alias_version_cache_ttl_seconds() == 0.0
+    assert model_loader._get_alias_version_cache_ttl_seconds() == 1.0
 
 
 def test_invalid_alias_version_cache_ttl_falls_back_to_zero(monkeypatch):
     monkeypatch.setenv("MODEL_ALIAS_CHECK_TTL_SECONDS", "not-a-number")
 
     assert model_loader._get_alias_version_cache_ttl_seconds() == 0.0
+
+
+def test_reload_expected_model_version_loads_specific_version_without_alias_check(
+    monkeypatch,
+):
+    loaded_model = object()
+    load_calls = []
+    monkeypatch.setenv("MODEL_NAME", "passwords")
+    monkeypatch.setenv("MODEL_ALIAS", "prod")
+    monkeypatch.setenv("MODEL_ALIAS_CHECK_TTL_SECONDS", "1")
+    monkeypatch.setattr(model_loader, "_model", None)
+    monkeypatch.setattr(model_loader, "_model_metadata", None)
+    monkeypatch.setattr(model_loader, "_last_reload_status", "not_loaded")
+    monkeypatch.setattr(model_loader, "_last_reload_error", None)
+
+    def fake_load_model(model_uri):
+        load_calls.append(model_uri)
+        return loaded_model
+
+    def fail_if_alias_is_read(model_name, model_alias):
+        raise AssertionError("expected-version reload must not read the alias")
+
+    monkeypatch.setattr(model_loader, "_load_mlflow_pyfunc_model", fake_load_model)
+    monkeypatch.setattr(
+        model_loader,
+        "_read_model_alias_version",
+        fail_if_alias_is_read,
+    )
+
+    metadata = model_loader.reload_model(expected_model_version="12")
+
+    assert load_calls == ["models:/passwords/12"]
+    assert metadata.requested_model_version == "12"
+    assert metadata.loaded_model_version == "12"
+    assert model_loader.get_model() is loaded_model
 
 
 def test_reload_model_expected_version_mismatch_records_failure_and_preserves_model(
@@ -394,6 +429,36 @@ def _set_loaded_model(monkeypatch, model, metadata):
     monkeypatch.setattr(model_loader, "_last_reload_error", None)
     monkeypatch.setattr(model_loader, "_cached_alias_version", None)
     monkeypatch.setattr(model_loader, "_alias_version_checked_at", 0.0)
+
+
+def test_predict_reuses_alias_version_within_ttl(monkeypatch):
+    current_model = PredictingModel(1.0)
+    current_metadata = ModelLoadMetadata(
+        model_name="passwords",
+        model_alias="prod",
+        requested_model_version="11",
+        loaded_model_version="11",
+        model_uri="models:/passwords/11",
+        reloaded_at="2026-06-05T00:00:00+00:00",
+        instance_id="instance-a",
+    )
+    alias_version_calls = []
+    _set_loaded_model(monkeypatch, current_model, current_metadata)
+    monkeypatch.setenv("MODEL_ALIAS_CHECK_TTL_SECONDS", "1")
+
+    def fake_get_current_model_alias_version():
+        alias_version_calls.append("prod")
+        return "11"
+
+    monkeypatch.setattr(
+        model_loader,
+        "get_current_model_alias_version",
+        fake_get_current_model_alias_version,
+    )
+
+    assert model_loader.predict_passwords(["first"]) == [1.0]
+    assert model_loader.predict_passwords(["second"]) == [1.0]
+    assert alias_version_calls == ["prod"]
 
 
 def test_predict_auto_reloads_when_prod_alias_moves(monkeypatch, caplog):
