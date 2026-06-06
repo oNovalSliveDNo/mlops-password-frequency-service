@@ -7,8 +7,10 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Response, s
 
 from app.gitlab_trigger import trigger_training_pipeline
 from app.model_loader import (
+    PredictDiagnostics,
     ensure_current_alias_model_loaded,
     get_model_state,
+    get_predict_diagnostics,
     predict_passwords,
     reload_model,
 )
@@ -148,14 +150,35 @@ def model_status() -> HealthResponse:
     return _current_health_response()
 
 
-def _set_model_headers(response: Response) -> None:
-    model_state = get_model_state()
-    response.headers["X-Instance-ID"] = model_state.instance_id
-    response.headers["X-Model-Version"] = model_state.loaded_version or ""
+def _set_model_headers(
+    response: Response, diagnostics: PredictDiagnostics | None = None
+) -> None:
+    if diagnostics is None:
+        model_state = get_model_state()
+        response.headers["X-Instance-ID"] = model_state.instance_id
+        response.headers["X-Model-Version"] = model_state.loaded_version or ""
+        return
+
+    response.headers["X-Instance-ID"] = diagnostics.instance_id
+    response.headers["X-Model-Version"] = diagnostics.loaded_version or ""
+
+
+def _log_predict_diagnostics(diagnostics: PredictDiagnostics) -> None:
+    logger.info(
+        (
+            "predict_completed: instance_id=%s loaded_version=%s "
+            "model_uri=%s password_count=%s"
+        ),
+        _sanitize_for_log(diagnostics.instance_id),
+        _sanitize_for_log(diagnostics.loaded_version),
+        _sanitize_for_log(diagnostics.model_uri),
+        diagnostics.password_count,
+    )
 
 
 @app.post("/predict", response_model=PredictResponse)
 def predict(request: PredictRequest, response: Response) -> PredictResponse:
+    password_count = len(request.Password)
     try:
         ensure_current_alias_model_loaded()
         predictions = predict_passwords(request.Password)
@@ -172,7 +195,9 @@ def predict(request: PredictRequest, response: Response) -> PredictResponse:
             detail="Failed to generate predictions",
         ) from exc
 
-    _set_model_headers(response)
+    diagnostics = get_predict_diagnostics(password_count=password_count)
+    _log_predict_diagnostics(diagnostics)
+    _set_model_headers(response, diagnostics)
     return PredictResponse(Times=predictions)
 
 

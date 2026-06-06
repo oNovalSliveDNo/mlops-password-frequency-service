@@ -4,7 +4,8 @@
 The script samples /model_state and /predict repeatedly and prints every
 observed instance_id and loaded_version/model version. If multiple versions are
 observed during the sample, the serving layer is inconsistent and may explain
-an LMS failure.
+an LMS failure. If multiple instance_id values are observed, /reload_model cannot
+be treated as a global service update through the public load balancer.
 """
 
 from __future__ import annotations
@@ -149,6 +150,7 @@ def main() -> int:
 
     _print_observations(observations)
 
+    exit_code = 0
     observed_versions = {item.loaded_version for item in observations}
     if len(observed_versions) > 1:
         print(
@@ -156,10 +158,21 @@ def main() -> int:
             "is a likely LMS failure cause.",
             file=sys.stderr,
         )
-        return 1
+        exit_code = 1
 
-    print("Observed versions are consistent across sampled serving responses.")
-    return 0
+    observed_instance_ids = {item.instance_id for item in observations}
+    if len(observed_instance_ids) > 1:
+        print(
+            "Multiple instance_id values observed: /reload_model through the "
+            "public endpoint cannot be considered a global service update.",
+            file=sys.stderr,
+        )
+        exit_code = 1
+
+    if exit_code == 0:
+        print("Observed versions and instance_id values are consistent.")
+
+    return exit_code
 
 
 if __name__ == "__main__":

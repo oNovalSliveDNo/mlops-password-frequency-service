@@ -54,6 +54,14 @@ class ModelServiceState:
     instance_id: str = ""
 
 
+@dataclass(frozen=True)
+class PredictDiagnostics:
+    instance_id: str
+    loaded_version: str | None
+    model_uri: str | None
+    password_count: int
+
+
 def _get_model_name() -> str:
     model_name = os.getenv("MODEL_NAME")
 
@@ -336,6 +344,17 @@ def get_model_state() -> ModelServiceState:
 def is_model_loaded() -> bool:
     with _model_lock:
         return _model is not None
+
+
+def get_predict_diagnostics(password_count: int) -> PredictDiagnostics:
+    """Return public-safe serving diagnostics for a completed prediction."""
+    model_state = get_model_state()
+    return PredictDiagnostics(
+        instance_id=model_state.instance_id,
+        loaded_version=model_state.loaded_version,
+        model_uri=model_state.model_uri,
+        password_count=password_count,
+    )
 
 
 def predict_passwords(passwords: list[str]) -> list[float]:

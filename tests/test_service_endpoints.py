@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 import app.main as main
 import app.model_loader as model_loader
-from app.model_loader import ModelLoadMetadata, ModelServiceState
+from app.model_loader import ModelLoadMetadata, ModelServiceState, PredictDiagnostics
 
 
 client = TestClient(main.app)
@@ -246,17 +246,12 @@ def test_predict_returns_serving_metadata_headers(monkeypatch):
     monkeypatch.setattr(main, "predict_passwords", lambda passwords: [1.0])
     monkeypatch.setattr(
         main,
-        "get_model_state",
-        lambda: ModelServiceState(
+        "get_predict_diagnostics",
+        lambda password_count: PredictDiagnostics(
             instance_id="instance-a",
-            model_loaded=True,
-            model_name="passwords",
-            model_alias="prod",
             loaded_version="12",
             model_uri="models:/passwords/12",
-            loaded_at="2026-06-05T00:00:00+00:00",
-            last_reload_status="success",
-            last_reload_error=None,
+            password_count=password_count,
         ),
     )
 
@@ -266,6 +261,35 @@ def test_predict_returns_serving_metadata_headers(monkeypatch):
     assert response.headers["X-Instance-ID"] == "instance-a"
     assert response.headers["X-Model-Version"] == "12"
     assert response.json() == {"Times": [1.0]}
+
+
+def test_predict_logs_safe_serving_diagnostics(monkeypatch, caplog):
+    secret = "do-not-log-this"
+    password = "do-not-log-password"
+    monkeypatch.setenv("MLFLOW_TRACKING_PASSWORD", secret)
+    monkeypatch.setattr(main, "predict_passwords", lambda passwords: [1.0, 2.0])
+    monkeypatch.setattr(
+        main,
+        "get_predict_diagnostics",
+        lambda password_count: PredictDiagnostics(
+            instance_id="instance-a",
+            loaded_version="12",
+            model_uri=f"https://user:{secret}@mlflow.example/models/passwords/12",
+            password_count=password_count,
+        ),
+    )
+
+    with caplog.at_level(logging.INFO):
+        response = client.post("/predict", json={"Password": [password, "second"]})
+
+    assert response.status_code == 200
+    assert "predict_completed" in caplog.text
+    assert "instance_id=instance-a" in caplog.text
+    assert "loaded_version=12" in caplog.text
+    assert "password_count=2" in caplog.text
+    assert "[REDACTED]" in caplog.text
+    assert secret not in caplog.text
+    assert password not in caplog.text
 
 
 def test_predict_error_detail_does_not_expose_secret(monkeypatch, caplog):
