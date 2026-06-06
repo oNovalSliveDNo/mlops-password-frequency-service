@@ -167,3 +167,35 @@ def test_model_state_matches_health_diagnostics(monkeypatch):
     assert response.json()["model_loaded"] is True
     assert response.json()["loaded_version"] == "12"
     assert response.json()["last_reload_status"] == "success"
+
+
+def test_model_status_returns_model_diagnostics(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "get_model_state",
+        lambda: ModelServiceState(
+            model_loaded=True,
+            model_name="passwords",
+            model_alias="prod",
+            loaded_version="13",
+            model_uri="models:/passwords/13",
+            loaded_at="2026-06-06T00:00:00+00:00",
+            last_reload_status="failed",
+            last_reload_error="MLflow model version is not ready",
+        ),
+    )
+
+    response = client.get("/model_status")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "model_loaded": True,
+        "model_name": "passwords",
+        "model_alias": "prod",
+        "loaded_version": "13",
+        "model_uri": "models:/passwords/13",
+        "loaded_at": "2026-06-06T00:00:00+00:00",
+        "last_reload_status": "failed",
+        "last_reload_error": "MLflow model version is not ready",
+    }

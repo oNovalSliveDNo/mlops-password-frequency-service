@@ -191,7 +191,41 @@ curl -X POST "https://your-amvera-service.amvera.ru/trigger" \
 
 ---
 
-### 3. Перезагрузка модели
+### 3. Диагностика модели
+
+`GET /health`
+`GET /model_state`
+`GET /model_status`
+
+Возвращают текущий статус сервиса и метаданные загруженной модели.
+
+`/model_status` является read-only alias для `/model_state` и возвращает тот же диагностический payload.
+
+#### Пример запроса
+
+```bash
+curl -X GET "https://your-amvera-service.amvera.ru/model_status"
+```
+
+#### Пример ответа
+
+```json
+{
+  "status": "ok",
+  "model_loaded": true,
+  "model_name": "passwords",
+  "model_alias": "prod",
+  "loaded_version": "12",
+  "model_uri": "models:/passwords@prod",
+  "loaded_at": "2026-06-05T00:00:00+00:00",
+  "last_reload_status": "success",
+  "last_reload_error": null
+}
+```
+
+---
+
+### 4. Перезагрузка модели
 
 `POST /reload_model`
 

@@ -43,6 +43,12 @@ def model_state() -> HealthResponse:
     return _current_health_response()
 
 
+@app.get("/model_status", response_model=HealthResponse)
+def model_status() -> HealthResponse:
+    """Expose the loaded model metadata using a status-oriented alias."""
+    return _current_health_response()
+
+
 @app.post("/predict", response_model=PredictResponse)
 def predict(request: PredictRequest) -> PredictResponse:
     try:
