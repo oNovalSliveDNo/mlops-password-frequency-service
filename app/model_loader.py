@@ -4,7 +4,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 import mlflow
 from mlflow.tracking import MlflowClient
 
@@ -148,7 +148,7 @@ def load_model_from_mlflow(
         requested_model_version=requested_model_version,
         loaded_model_version=loaded_model_version,
         model_uri=model_uri,
-        reloaded_at=datetime.now(UTC).isoformat(),
+        reloaded_at=datetime.now(timezone.utc).isoformat(),
         instance_id=get_instance_id(),
     )
 

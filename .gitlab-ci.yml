@@ -31,7 +31,7 @@ cache:
 # =========================
 lint:
   stage: check
-  image: python:3.11-slim
+  image: python:3.10-slim
   rules:
     - if: '$CI_PIPELINE_SOURCE == "push"'
   before_script:
@@ -45,7 +45,7 @@ lint:
 # =========================
 format:
   stage: check
-  image: python:3.11-slim
+  image: python:3.10-slim
   rules:
     - if: '$CI_PIPELINE_SOURCE == "push"'
   before_script:
@@ -59,7 +59,7 @@ format:
 # =========================
 test:
   stage: check
-  image: python:3.11-slim
+  image: python:3.10-slim
   rules:
     - if: '$CI_PIPELINE_SOURCE == "push"'
   before_script:
@@ -103,7 +103,7 @@ build:
 # =========================
 deploy:
   stage: deploy
-  image: python:3.11-slim
+  image: python:3.10-slim
   rules:
     - if: '$CI_PIPELINE_SOURCE == "push"'
   needs:
