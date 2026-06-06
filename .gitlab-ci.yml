@@ -129,7 +129,7 @@ deploy:
         skip: true
       
       run:
-        image: ${DOCKER_IMAGE}:latest
+        image: ${DOCKER_IMAGE}:${CI_COMMIT_SHORT_SHA}
         persistenceMount: /data
         containerPort: "8000"
       EOF
@@ -147,7 +147,7 @@ deploy:
     - git init
     - git checkout -b master
     - git add amvera.yml
-    - git commit -m "Deploy ${DOCKER_IMAGE}:latest to Amvera"
+    - git commit -m "Deploy ${DOCKER_IMAGE}:${CI_COMMIT_SHORT_SHA} to Amvera"
 
     - |
       AMVERA_AUTH_URL="$(python - <<'PY'

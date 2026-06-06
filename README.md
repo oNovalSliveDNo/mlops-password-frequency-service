@@ -439,10 +439,10 @@ $DOCKERHUB_USERNAME/mlops-password-frequency-service:<tag>
 
 Pipeline по push публикует в DockerHub два тега одного и того же образа:
 
-* `${CI_COMMIT_SHORT_SHA}` — конкретная версия, привязанная к commit в GitLab;
-* `latest` — текущая версия, которую использует Amvera deployment.
+* `${CI_COMMIT_SHORT_SHA}` — конкретная immutable-версия, привязанная к commit в GitLab; именно этот tag записывается в `amvera.yml` как `run.image` и определяет конкретную версию деплоя;
+* `latest` — удобный alias на тот же образ для ручных проверок и диагностики, но не source of truth для Amvera deployment.
 
-Код, локальные файлы и содержимое GitHub-репозитория сами по себе не являются deployment artifact. Для проверки production-версии нужно смотреть, какой DockerHub image/tag запущен в Amvera.
+Код, локальные файлы и содержимое GitHub-репозитория сами по себе не являются deployment artifact. Для проверки production-версии нужно смотреть, какой DockerHub image/tag запущен в Amvera: конкретная версия деплоя определяется tag `${CI_COMMIT_SHORT_SHA}` из GitLab pipeline.
 
 ### Роль Amvera
 
@@ -465,9 +465,9 @@ GitLab commit -> GitLab CI/CD -> DockerHub image -> Amvera run.image -> серв
 3. Проверить в DockerHub, что появился ожидаемый tag образа:
 
    * `${CI_COMMIT_SHORT_SHA}` для финального commit;
-   * `latest`, если Amvera настроена на запуск latest-образа.
+   * `latest` как удобный alias на тот же образ.
 
-4. Проверить в Amvera, какой image/tag реально используется в `run.image`. Он должен указывать на DockerHub image, собранный GitLab pipeline.
+4. Проверить в Amvera, какой image/tag реально используется в `run.image`. Он должен указывать на DockerHub image, собранный GitLab pipeline, с tag `${CI_COMMIT_SHORT_SHA}` финального commit, а не на `latest`.
 5. Проверить endpoint сервиса после деплоя, например:
 
    ```bash
@@ -482,7 +482,7 @@ GitLab commit -> GitLab CI/CD -> DockerHub image -> Amvera run.image -> серв
    {"Times": [0.1, 0.2]}
    ```
 
-> **Важно:** ручные изменения в GitHub или Amvera без последующей синхронизации с GitLab могут привести к тому, что LMS проверит старую версию сервиса. Перед сдачей всегда сверяйте GitLab commit, DockerHub tag, `run.image` в Amvera и фактический ответ endpoint.
+> **Важно:** ручные изменения в GitHub или Amvera без последующей синхронизации с GitLab могут привести к тому, что LMS проверит старую версию сервиса. Перед сдачей всегда сверяйте GitLab commit, DockerHub tag `${CI_COMMIT_SHORT_SHA}`, `run.image` в Amvera и фактический ответ endpoint.
 
 ---
 
@@ -513,7 +513,7 @@ deploy
 3. `pytest` запускает тесты;
 4. Kaniko собирает Docker-образ;
 5. Docker-образ пушится в DockerHub;
-6. amvera.yml пушится в Amvera и сервис обновляется.
+6. generated `amvera.yml` с `run.image: ${DOCKER_IMAGE}:${CI_COMMIT_SHORT_SHA}` пушится в Amvera и сервис обновляется.
 
 ---
 
