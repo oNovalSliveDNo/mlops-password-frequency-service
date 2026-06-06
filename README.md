@@ -421,6 +421,71 @@ prod
 
 ---
 
+## Repository / deployment workflow
+
+### Source of truth для CI/CD
+
+Source of truth для кода, CI/CD и финальной версии сервиса — GitLab-репозиторий проекта. Именно GitLab pipeline должен запускать проверки, собирать Docker image и обновлять конфигурацию деплоя.
+
+GitHub может использоваться как зеркало, архив или публичная витрина проекта, но не должен считаться источником финального production-деплоя, если изменения не синхронизированы с GitLab.
+
+### Единственный deployment artifact
+
+Единственный deployment artifact проекта — DockerHub image:
+
+```text
+$DOCKERHUB_USERNAME/mlops-password-frequency-service:<tag>
+```
+
+Pipeline по push публикует в DockerHub два тега одного и того же образа:
+
+* `${CI_COMMIT_SHORT_SHA}` — конкретная версия, привязанная к commit в GitLab;
+* `latest` — текущая версия, которую использует Amvera deployment.
+
+Код, локальные файлы и содержимое GitHub-репозитория сами по себе не являются deployment artifact. Для проверки production-версии нужно смотреть, какой DockerHub image/tag запущен в Amvera.
+
+### Роль Amvera
+
+Amvera не должна самостоятельно собирать исходный код проекта. В `amvera.yml` должен быть включён режим `build.skip: true`, а запуск должен происходить из Docker image, собранного GitLab pipeline и опубликованного в DockerHub.
+
+Ожидаемая схема деплоя:
+
+```text
+GitLab commit -> GitLab CI/CD -> DockerHub image -> Amvera run.image -> сервис
+```
+
+Если Amvera начинает собирать код из своего Git-репозитория напрямую, это нарушает workflow проекта: появляется риск запустить не тот commit, не пройти GitLab checks или проверить версию, которая не совпадает с DockerHub image.
+
+### Локальный workflow перед финальной сдачей
+
+Перед финальной сдачей и проверкой LMS нужно выполнить один и тот же контрольный сценарий:
+
+1. Запушить финальные изменения в GitLab-репозиторий, который является source of truth для CI/CD.
+2. Дождаться успешного GitLab pipeline по push: `lint`, `format`, `test`, `build` и `deploy` должны завершиться без ошибок.
+3. Проверить в DockerHub, что появился ожидаемый tag образа:
+
+   * `${CI_COMMIT_SHORT_SHA}` для финального commit;
+   * `latest`, если Amvera настроена на запуск latest-образа.
+
+4. Проверить в Amvera, какой image/tag реально используется в `run.image`. Он должен указывать на DockerHub image, собранный GitLab pipeline.
+5. Проверить endpoint сервиса после деплоя, например:
+
+   ```bash
+   curl -X POST "https://your-amvera-service.amvera.ru/predict" \
+     -H "Content-Type: application/json" \
+     -d '{"Password": ["qwerty", "123456"]}'
+   ```
+
+   Ответ должен соответствовать контракту API:
+
+   ```json
+   {"Times": [0.1, 0.2]}
+   ```
+
+> **Важно:** ручные изменения в GitHub или Amvera без последующей синхронизации с GitLab могут привести к тому, что LMS проверит старую версию сервиса. Перед сдачей всегда сверяйте GitLab commit, DockerHub tag, `run.image` в Amvera и фактический ответ endpoint.
+
+---
+
 ## CI/CD pipeline
 
 В проекте используется два типа pipeline.
