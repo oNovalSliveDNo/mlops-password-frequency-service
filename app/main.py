@@ -8,7 +8,6 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Response, s
 from app.gitlab_trigger import trigger_training_pipeline
 from app.model_loader import (
     PredictDiagnostics,
-    ensure_current_alias_model_loaded,
     get_model_state,
     get_predict_diagnostics,
     predict_passwords,
@@ -180,7 +179,6 @@ def _log_predict_diagnostics(diagnostics: PredictDiagnostics) -> None:
 def predict(request: PredictRequest, response: Response) -> PredictResponse:
     password_count = len(request.Password)
     try:
-        ensure_current_alias_model_loaded()
         predictions = predict_passwords(request.Password)
     except RuntimeError as exc:
         _log_endpoint_error("/predict", exc)
