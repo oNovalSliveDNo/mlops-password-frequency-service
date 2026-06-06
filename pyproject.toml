@@ -1,5 +1,5 @@
 [tool.ruff]
-extend-exclude = [".venv*", "venv*"]
+extend-exclude = [".venv*", "venv*", "archive_old_project"]
 
 [tool.mypy]
 python_version = "3.11"
