@@ -242,6 +242,65 @@ def test_model_status_returns_model_diagnostics(monkeypatch):
     }
 
 
+class PredictingModel:
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+    def predict(self, passwords):
+        return [self.value for _ in passwords]
+
+
+def test_predict_reloads_moved_alias_before_response(monkeypatch):
+    previous_model = PredictingModel(1.0)
+    next_model = PredictingModel(2.0)
+    previous_metadata = ModelLoadMetadata(
+        model_name="passwords",
+        model_alias="prod",
+        requested_model_version="11",
+        loaded_model_version="11",
+        model_uri="models:/passwords/11",
+        reloaded_at="2026-06-05T00:00:00+00:00",
+        instance_id="instance-a",
+    )
+    next_metadata = ModelLoadMetadata(
+        model_name="passwords",
+        model_alias="prod",
+        requested_model_version="12",
+        loaded_model_version="12",
+        model_uri="models:/passwords/12",
+        reloaded_at="2026-06-06T00:00:00+00:00",
+        instance_id="instance-a",
+    )
+    monkeypatch.setattr(model_loader, "_model", previous_model)
+    monkeypatch.setattr(model_loader, "_model_metadata", previous_metadata)
+    monkeypatch.setattr(model_loader, "_last_reload_status", "success")
+    monkeypatch.setattr(model_loader, "_last_reload_error", None)
+    monkeypatch.setattr(model_loader, "_cached_alias_version", None)
+    monkeypatch.setattr(model_loader, "_alias_version_checked_at", 0.0)
+    monkeypatch.setenv("INSTANCE_ID", "instance-a")
+    monkeypatch.delenv("MODEL_ALIAS_CHECK_TTL_SECONDS", raising=False)
+    monkeypatch.setattr(model_loader, "get_current_model_alias_version", lambda: "12")
+
+    def fake_load_model_from_mlflow(expected_model_version=None):
+        assert expected_model_version == "12"
+        return next_model, next_metadata
+
+    monkeypatch.setattr(
+        model_loader,
+        "load_model_from_mlflow",
+        fake_load_model_from_mlflow,
+    )
+
+    response = client.post("/predict", json={"Password": ["password"]})
+
+    assert response.status_code == 200
+    assert response.headers["X-Instance-ID"] == "instance-a"
+    assert response.headers["X-Model-Version"] == "12"
+    assert response.json() == {"Times": [2.0]}
+    assert model_loader.get_model() is next_model
+    assert model_loader.get_model_metadata() == next_metadata
+
+
 def test_predict_returns_serving_metadata_headers(monkeypatch):
     monkeypatch.setattr(main, "predict_passwords", lambda passwords: [1.0])
     monkeypatch.setattr(

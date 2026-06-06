@@ -112,11 +112,11 @@ def get_current_model_alias_version(
 
 
 def _get_alias_version_cache_ttl_seconds() -> float:
-    value = os.getenv("MODEL_ALIAS_CHECK_TTL_SECONDS", "5")
+    value = os.getenv("MODEL_ALIAS_CHECK_TTL_SECONDS", "0")
     try:
         ttl_seconds = float(value)
     except ValueError:
-        return 5.0
+        return 0.0
 
     return max(0.0, ttl_seconds)
 

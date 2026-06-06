@@ -24,6 +24,18 @@ def test_get_current_model_alias_version_reads_mlflow_alias(monkeypatch):
     assert calls == [("passwords", "prod")]
 
 
+def test_alias_version_cache_ttl_defaults_to_zero(monkeypatch):
+    monkeypatch.delenv("MODEL_ALIAS_CHECK_TTL_SECONDS", raising=False)
+
+    assert model_loader._get_alias_version_cache_ttl_seconds() == 0.0
+
+
+def test_invalid_alias_version_cache_ttl_falls_back_to_zero(monkeypatch):
+    monkeypatch.setenv("MODEL_ALIAS_CHECK_TTL_SECONDS", "not-a-number")
+
+    assert model_loader._get_alias_version_cache_ttl_seconds() == 0.0
+
+
 def test_reload_model_expected_version_mismatch_records_failure_and_preserves_model(
     monkeypatch,
 ):
