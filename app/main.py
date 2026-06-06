@@ -1,18 +1,10 @@
 import logging
 import os
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Response, status
 
-from app.gitlab_trigger import trigger_training_pipeline
-from app.model_loader import (
-    PredictDiagnostics,
-    get_model_state,
-    get_predict_diagnostics,
-    predict_passwords,
-    reload_model,
-)
 from app.schemas import (
     HealthResponse,
     PredictRequest,
@@ -24,12 +16,15 @@ from app.schemas import (
     TriggerResponse,
 )
 
+if TYPE_CHECKING:
+    from app.model_loader import PredictDiagnostics
+
 # The service intentionally uses lazy model loading: the MLflow model is
 # loaded by get_model() on the first prediction or by an explicit reload request.
 # /health is therefore a liveness probe and /ready is the readiness probe.
 MODEL_LOADING_MODE = "lazy"
 
-app = FastAPI(title="Password Frequency Service")
+app = FastAPI(title="Password Frequency Serving Service")
 logger = logging.getLogger(__name__)
 
 _SENSITIVE_LOG_KEY_PARTS = ("secret", "credential", "password", "token", "key")
@@ -45,6 +40,43 @@ _SENSITIVE_ENV_NAMES = (
 )
 _REDACTED_LOG_VALUE = "[REDACTED]"
 _URL_CREDENTIALS_PATTERN = re.compile(r"(://)([^/\s:@]+):([^@/\s]+)@")
+
+
+def get_model_state():
+    """Lazy proxy to avoid importing ML dependencies during FastAPI startup."""
+    from app.model_loader import get_model_state as _get_model_state
+
+    return _get_model_state()
+
+
+def get_predict_diagnostics(password_count: int):
+    """Lazy proxy to avoid importing ML dependencies until prediction handling."""
+    from app.model_loader import get_predict_diagnostics as _get_predict_diagnostics
+
+    return _get_predict_diagnostics(password_count=password_count)
+
+
+def predict_passwords(passwords: list[str]) -> list[float]:
+    """Lazy proxy to avoid importing ML dependencies until prediction handling."""
+    from app.model_loader import predict_passwords as _predict_passwords
+
+    return _predict_passwords(passwords)
+
+
+def reload_model(expected_model_version: str | None = None):
+    """Lazy proxy to avoid importing ML dependencies until model reload handling."""
+    from app.model_loader import reload_model as _reload_model
+
+    return _reload_model(expected_model_version=expected_model_version)
+
+
+def trigger_training_pipeline(data_url: str):
+    """Lazy proxy for compatibility with tests and the legacy /trigger endpoint."""
+    from app.gitlab_trigger import (
+        trigger_training_pipeline as _trigger_training_pipeline,
+    )
+
+    return _trigger_training_pipeline(data_url=data_url)
 
 
 def _is_sensitive_log_key(key: str) -> bool:
@@ -150,7 +182,7 @@ def model_status() -> HealthResponse:
 
 
 def _set_model_headers(
-    response: Response, diagnostics: PredictDiagnostics | None = None
+    response: Response, diagnostics: "PredictDiagnostics | None" = None
 ) -> None:
     if diagnostics is None:
         model_state = get_model_state()
@@ -162,7 +194,7 @@ def _set_model_headers(
     response.headers["X-Model-Version"] = diagnostics.loaded_version or ""
 
 
-def _log_predict_diagnostics(diagnostics: PredictDiagnostics) -> None:
+def _log_predict_diagnostics(diagnostics: "PredictDiagnostics") -> None:
     logger.info(
         (
             "predict_completed: instance_id=%s loaded_version=%s "

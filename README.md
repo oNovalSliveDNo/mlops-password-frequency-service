@@ -92,9 +92,12 @@ mlops-password-frequency-service
 ├── .env.example
 ├── app
 │   ├── gitlab_trigger.py
-│   ├── main.py
+│   ├── main.py                  # serving API: /predict, /reload_model, /health, /ready
 │   ├── model_loader.py
 │   └── schemas.py
+├── trigger_app
+│   ├── __init__.py
+│   └── main.py                  # lightweight trigger API: /trigger, /health
 ├── training
 │   ├── download_data.py
 │   ├── entropy.py
@@ -109,7 +112,9 @@ mlops-password-frequency-service
 
 ### Назначение основных папок
 
-`app/` — код HTTP-сервиса.
+`app/` — код основного HTTP-сервиса model serving. Он обслуживает `/predict`, `/reload_model`, `/health`, `/ready`, `/model_state` и `/model_status`. Импорты ML-зависимостей выполняются лениво внутри serving endpoints, поэтому startup приложения не должен импортировать `app.model_loader`, MLflow, sklearn или pandas.
+
+`trigger_app/` — отдельное лёгкое FastAPI-приложение для GitLab trigger endpoint. Оно обслуживает `/trigger` и `/health`, не импортирует `app.model_loader` и не загружает модель при cold start. Для запуска того же Docker-образа в режиме trigger service задайте `APP_MODULE=trigger_app.main:app`.
 
 `training/` — код обучающего пайплайна.
 
@@ -179,6 +184,8 @@ curl -X POST "https://your-amvera-service.amvera.ru/predict" \
 
 `POST /trigger`
 
+Рекомендуем обслуживать этот endpoint отдельным лёгким Amvera-приложением или отдельным process из `trigger_app.main:app`, чтобы cold start trigger service не зависел от MLflow/sklearn/pandas и загрузки модели. Основной serving service можно оставить на `app.main:app` для `/predict` и `/reload_model`; в LMS указывайте `predictions_url` на serving `/predict`, а `trigger_url` на trigger service `/trigger`.
+
 Принимает ссылку на новый CSV-файл с данными и запускает обучающий pipeline в GitLab CI/CD.
 
 #### Пример запроса
@@ -197,7 +204,20 @@ curl -X POST "https://your-amvera-service.amvera.ru/trigger" \
 }
 ```
 
-Эндпоинт не ждёт завершения обучения. Он только запускает pipeline и быстро возвращает ответ.
+Эндпоинт не ждёт завершения обучения. Он только ставит запуск pipeline в background task и быстро возвращает `202 Accepted`.
+
+#### Запуск trigger service из Docker-образа
+
+```bash
+docker run --rm -p 8001:8000 \
+  -e APP_MODULE=trigger_app.main:app \
+  -e GITLAB_URL=https://gitlab.example.com \
+  -e GITLAB_PROJECT_ID=group/project \
+  -e GITLAB_TRIGGER_TOKEN=... \
+  daniellenova/mlops-password-frequency-service:latest
+```
+
+Для serving service оставьте значение по умолчанию `APP_MODULE=app.main:app` или не задавайте `APP_MODULE`.
 
 ---
 

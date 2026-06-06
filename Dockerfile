@@ -17,6 +17,7 @@ RUN python -m pip install --upgrade pip \
     && pip install --no-cache-dir -r requirements-app.txt
 
 COPY app ./app
+COPY trigger_app ./trigger_app
 COPY training/__init__.py training/entropy.py ./training/
 
 RUN useradd --create-home --shell /bin/bash appuser \
@@ -25,3 +26,4 @@ RUN useradd --create-home --shell /bin/bash appuser \
 USER appuser
 
 CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "uvicorn ${APP_MODULE:-app.main:app} --host 0.0.0.0 --port ${PORT:-8000}"]
