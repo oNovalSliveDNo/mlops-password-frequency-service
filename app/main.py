@@ -6,7 +6,12 @@ from typing import Any
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Response, status
 
 from app.gitlab_trigger import trigger_training_pipeline
-from app.model_loader import get_model_state, predict_passwords, reload_model
+from app.model_loader import (
+    ensure_current_alias_model_loaded,
+    get_model_state,
+    predict_passwords,
+    reload_model,
+)
 from app.schemas import (
     HealthResponse,
     PredictRequest,
@@ -152,6 +157,7 @@ def _set_model_headers(response: Response) -> None:
 @app.post("/predict", response_model=PredictResponse)
 def predict(request: PredictRequest, response: Response) -> PredictResponse:
     try:
+        ensure_current_alias_model_loaded()
         predictions = predict_passwords(request.Password)
     except RuntimeError as exc:
         _log_endpoint_error("/predict", exc)

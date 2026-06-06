@@ -1,10 +1,27 @@
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
 import app.model_loader as model_loader
 from app.model_loader import ModelLoadMetadata
+
+
+def test_get_current_model_alias_version_reads_mlflow_alias(monkeypatch):
+    calls = []
+
+    class FakeMlflowClient:
+        def get_model_version_by_alias(self, model_name, model_alias):
+            calls.append((model_name, model_alias))
+            return SimpleNamespace(version=12)
+
+    monkeypatch.setattr(model_loader, "MlflowClient", FakeMlflowClient)
+
+    version = model_loader.get_current_model_alias_version("passwords", "prod")
+
+    assert version == "12"
+    assert calls == [("passwords", "prod")]
 
 
 def test_reload_model_expected_version_mismatch_records_failure_and_preserves_model(
@@ -346,5 +363,103 @@ def test_get_model_lazy_load_failure_records_failed_state(monkeypatch):
     state = model_loader.get_model_state()
     assert state.model_loaded is False
     assert state.loaded_version is None
+    assert state.last_reload_status == "failed"
+    assert state.last_reload_error == "model_reload_failed:RuntimeError"
+
+
+class PredictingModel:
+    def __init__(self, value: float) -> None:
+        self.value = value
+
+    def predict(self, passwords):
+        return [self.value for _ in passwords]
+
+
+def _set_loaded_model(monkeypatch, model, metadata):
+    monkeypatch.setattr(model_loader, "_model", model)
+    monkeypatch.setattr(model_loader, "_model_metadata", metadata)
+    monkeypatch.setattr(model_loader, "_last_reload_status", "success")
+    monkeypatch.setattr(model_loader, "_last_reload_error", None)
+    monkeypatch.setattr(model_loader, "_cached_alias_version", None)
+    monkeypatch.setattr(model_loader, "_alias_version_checked_at", 0.0)
+
+
+def test_predict_auto_reloads_when_prod_alias_moves(monkeypatch, caplog):
+    previous_model = PredictingModel(1.0)
+    next_model = PredictingModel(2.0)
+    previous_metadata = ModelLoadMetadata(
+        model_name="passwords",
+        model_alias="prod",
+        requested_model_version="11",
+        loaded_model_version="11",
+        model_uri="models:/passwords/11",
+        reloaded_at="2026-06-05T00:00:00+00:00",
+        instance_id="instance-a",
+    )
+    next_metadata = ModelLoadMetadata(
+        model_name="passwords",
+        model_alias="prod",
+        requested_model_version="12",
+        loaded_model_version="12",
+        model_uri="models:/passwords/12",
+        reloaded_at="2026-06-06T00:00:00+00:00",
+        instance_id="instance-a",
+    )
+    _set_loaded_model(monkeypatch, previous_model, previous_metadata)
+    monkeypatch.setenv("MODEL_ALIAS_CHECK_TTL_SECONDS", "0")
+    monkeypatch.setenv("INSTANCE_ID", "instance-a")
+    monkeypatch.setattr(model_loader, "get_current_model_alias_version", lambda: "12")
+
+    def fake_load_model_from_mlflow(expected_model_version=None):
+        assert expected_model_version == "12"
+        return next_model, next_metadata
+
+    monkeypatch.setattr(
+        model_loader,
+        "load_model_from_mlflow",
+        fake_load_model_from_mlflow,
+    )
+
+    with caplog.at_level("INFO", logger="app.model_loader"):
+        predictions = model_loader.predict_passwords(["password"])
+
+    assert predictions == [2.0]
+    assert model_loader.get_model() is next_model
+    assert model_loader.get_model_metadata() == next_metadata
+    assert (
+        "auto_reload_on_predict: old_version=11, new_version=12, instance_id=instance-a"
+    ) in caplog.text
+
+
+def test_predict_auto_reload_failure_preserves_previous_model(monkeypatch):
+    previous_model = PredictingModel(1.0)
+    previous_metadata = ModelLoadMetadata(
+        model_name="passwords",
+        model_alias="prod",
+        requested_model_version="11",
+        loaded_model_version="11",
+        model_uri="models:/passwords/11",
+        reloaded_at="2026-06-05T00:00:00+00:00",
+    )
+    _set_loaded_model(monkeypatch, previous_model, previous_metadata)
+    monkeypatch.setenv("MODEL_ALIAS_CHECK_TTL_SECONDS", "0")
+    monkeypatch.setattr(model_loader, "get_current_model_alias_version", lambda: "12")
+
+    def fake_load_model_from_mlflow(expected_model_version=None):
+        assert expected_model_version == "12"
+        raise RuntimeError("MLflow model version is not ready")
+
+    monkeypatch.setattr(
+        model_loader,
+        "load_model_from_mlflow",
+        fake_load_model_from_mlflow,
+    )
+
+    predictions = model_loader.predict_passwords(["password"])
+
+    assert predictions == [1.0]
+    assert model_loader.get_model() is previous_model
+    assert model_loader.get_model_metadata() == previous_metadata
+    state = model_loader.get_model_state()
     assert state.last_reload_status == "failed"
     assert state.last_reload_error == "model_reload_failed:RuntimeError"
