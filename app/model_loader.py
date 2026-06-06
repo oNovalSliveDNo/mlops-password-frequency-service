@@ -1,12 +1,19 @@
 import logging
 import os
-import socket
 import threading
 import time
-from dataclasses import dataclass
 from datetime import datetime, timezone
+
 import mlflow
 from mlflow.tracking import MlflowClient
+
+from app.model_state import (
+    ModelLoadMetadata,
+    ModelServiceState,
+    PredictDiagnostics,
+    get_instance_id,
+    set_model_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,45 +28,13 @@ _cached_alias_version: str | None = None
 _alias_version_checked_at = 0.0
 
 
-def get_instance_id() -> str:
-    """Return a stable diagnostic identifier for this service process."""
-    return (
-        os.getenv("INSTANCE_ID")
-        or os.getenv("SERVICE_INSTANCE_ID")
-        or socket.gethostname()
+def _publish_model_state() -> None:
+    set_model_state(
+        model_loaded=_model is not None,
+        model_metadata=_model_metadata,
+        last_reload_status=_last_reload_status,
+        last_reload_error=_last_reload_error,
     )
-
-
-@dataclass(frozen=True)
-class ModelLoadMetadata:
-    model_name: str
-    model_alias: str
-    requested_model_version: str | None
-    loaded_model_version: str | None
-    model_uri: str
-    reloaded_at: str
-    instance_id: str = ""
-
-
-@dataclass(frozen=True)
-class ModelServiceState:
-    model_loaded: bool
-    model_name: str | None
-    model_alias: str | None
-    loaded_version: str | None
-    model_uri: str | None
-    loaded_at: str | None
-    last_reload_status: str
-    last_reload_error: str | None
-    instance_id: str = ""
-
-
-@dataclass(frozen=True)
-class PredictDiagnostics:
-    instance_id: str
-    loaded_version: str | None
-    model_uri: str | None
-    password_count: int
 
 
 def _get_model_name() -> str:
@@ -203,6 +178,7 @@ def _mark_alias_check_failed(exc: Exception) -> None:
     with _model_lock:
         _last_reload_status = "failed"
         _last_reload_error = _safe_reload_error(exc)
+        _publish_model_state()
 
 
 def ensure_current_alias_model_loaded() -> None:
@@ -269,11 +245,13 @@ def get_model():
         except Exception as exc:
             _last_reload_status = "failed"
             _last_reload_error = _safe_reload_error(exc)
+            _publish_model_state()
             raise
 
         _last_reload_status = "success"
         _last_reload_error = None
         _remember_loaded_alias_version(_model_metadata)
+        _publish_model_state()
         return _model
 
 
@@ -298,6 +276,7 @@ def reload_model(expected_model_version: str | None = None) -> ModelLoadMetadata
         with _model_lock:
             _last_reload_status = "failed"
             _last_reload_error = _safe_reload_error(exc)
+            _publish_model_state()
         raise
 
     with _model_lock:
@@ -306,6 +285,7 @@ def reload_model(expected_model_version: str | None = None) -> ModelLoadMetadata
         _last_reload_status = "success"
         _last_reload_error = None
         _remember_loaded_alias_version(_model_metadata)
+        _publish_model_state()
         return _model_metadata
 
 
@@ -387,3 +367,4 @@ def set_model_for_tests(model):
         _model_metadata = None
         _last_reload_status = "success" if model is not None else "not_loaded"
         _last_reload_error = None
+        _publish_model_state()

@@ -17,7 +17,7 @@ from app.schemas import (
 )
 
 if TYPE_CHECKING:
-    from app.model_loader import PredictDiagnostics
+    from app.model_state import PredictDiagnostics
 
 # The service intentionally uses lazy model loading: the MLflow model is
 # loaded by get_model() on the first prediction or by an explicit reload request.
@@ -43,8 +43,8 @@ _URL_CREDENTIALS_PATTERN = re.compile(r"(://)([^/\s:@]+):([^@/\s]+)@")
 
 
 def get_model_state():
-    """Lazy proxy to avoid importing ML dependencies during FastAPI startup."""
-    from app.model_loader import get_model_state as _get_model_state
+    """Return lightweight serving state without importing ML dependencies."""
+    from app.model_state import get_model_state as _get_model_state
 
     return _get_model_state()
 
