@@ -569,14 +569,28 @@ MODEL_ALIAS=prod
 GITLAB_URL=
 GITLAB_PROJECT_ID=
 GITLAB_REF=main
-GITLAB_TOKEN=
 GITLAB_TRIGGER_TOKEN=
+
+# Для запуска pipeline из `/trigger` нужен только GitLab pipeline trigger token.
+# `GITLAB_TOKEN` / project access token не используется сервисом и не должен
+# добавляться в `.env` или Amvera env variables для этого сценария.
 
 SERVICE_RELOAD_URL=
 SERVICE_RELOAD_SECRET=
 ```
 
 Никогда не коммить `.env` в репозиторий.
+
+### Минимальные GitLab credentials для `/trigger`
+
+`POST /trigger` запускает GitLab pipeline напрямую через endpoint `POST /projects/:id/trigger/pipeline` и передаёт `DATA_URL` как pipeline variable. Для этого сценария сервису нужны только:
+
+* `GITLAB_URL` — URL GitLab instance;
+* `GITLAB_PROJECT_ID` — numeric project id или path проекта вида `group/project` (сервис сам URL-encodes path);
+* `GITLAB_REF` — ветка/tag для запуска, по умолчанию `main`;
+* `GITLAB_TRIGGER_TOKEN` — GitLab pipeline trigger token из **Settings → CI/CD → Pipeline trigger tokens**.
+
+`GITLAB_TOKEN` и GitLab project access token сервису больше не нужны. Не добавляй `GITLAB_TOKEN` в Amvera env variables для запуска `/trigger`. Если отдельный процесс всё-таки использует GitLab Project Access Token, выдай ему отдельный least-privilege token и не включай scopes `create_runner`, `manage_runner`, `k8s_proxy`, `write_repository`, `read_registry`, `write_registry`, `ai_features`, если они явно не требуются этому отдельному процессу.
 
 ---
 

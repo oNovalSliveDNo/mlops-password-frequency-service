@@ -1141,7 +1141,6 @@ def test_sanitize_for_log_redacts_all_configured_secret_env_values(monkeypatch):
         "DOCKERHUB_TOKEN": "dockerhub-token",
         "SERVICE_RELOAD_SECRET": "reload-secret",
         "SERVICE_RELOAD_URL": "https://reload-user:reload-password@service.example/reload_model",
-        "GITLAB_TOKEN": "gitlab-token",
         "GITLAB_TRIGGER_TOKEN": "gitlab-trigger-token",
         "AMVERA_PASSWORD": "amvera-password",
     }
@@ -1151,7 +1150,7 @@ def test_sanitize_for_log_redacts_all_configured_secret_env_values(monkeypatch):
     value = {
         "message": " ".join(secrets.values()),
         "items": [
-            f"Authorization: Bearer {secrets['GITLAB_TOKEN']}",
+            f"Authorization: Bearer {secrets['GITLAB_TRIGGER_TOKEN']}",
             (f"password={secrets['AMVERA_PASSWORD']}",),
         ],
         "callback_url": "https://user:inline-password@example.com/reload_model",
@@ -1180,7 +1179,6 @@ def test_main_completed_log_redacts_all_configured_secret_env_values(
         "DOCKERHUB_TOKEN": "dockerhub-token",
         "SERVICE_RELOAD_SECRET": "reload-secret",
         "SERVICE_RELOAD_URL": "https://reload-user:reload-password@service.example/reload_model",
-        "GITLAB_TOKEN": "gitlab-token",
         "GITLAB_TRIGGER_TOKEN": "gitlab-trigger-token",
         "AMVERA_PASSWORD": "amvera-password",
     }
