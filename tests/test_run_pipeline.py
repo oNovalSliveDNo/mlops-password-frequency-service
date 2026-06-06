@@ -516,10 +516,51 @@ def test_run_training_pipeline_stops_on_invalid_schema_validation(monkeypatch, c
     }
     assert "data downloaded: downloaded.csv" in caplog.text
     assert "validation failed: bad data" in caplog.text
+    assert "VALIDATION_FAILED_NO_MODEL_REGISTERED" in caplog.text
+    assert "errors=['bad data']" in caplog.text
+    assert "metrics={'n_rows': 1" in caplog.text
     _assert_duration_logs(
         caplog, ["data download", "schema validation", "total pipeline"]
     )
     assert calls == []
+
+
+def test_run_training_pipeline_exits_on_validation_failed_when_env_enabled(
+    monkeypatch,
+):
+    from training.run_pipeline import run_training_pipeline
+
+    def fail_if_called(*args, **kwargs):
+        pytest.fail("training side effects must not run after validation failure")
+
+    monkeypatch.setenv("DATA_URL", "https://example.com/data.csv")
+    monkeypatch.setenv("FAIL_CI_ON_VALIDATION_FAILED", "true")
+    monkeypatch.setattr(
+        "training.run_pipeline.download_data",
+        lambda data_url, output_path: "downloaded.csv",
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.validate_data_file",
+        lambda input_path, report_path: SimpleNamespace(
+            is_valid=False,
+            errors=["bad data"],
+            n_rows=1,
+            columns=["Password", "Times"],
+            metrics={"row_count": 1},
+        ),
+    )
+    monkeypatch.setattr("training.run_pipeline.train_password_model", fail_if_called)
+    monkeypatch.setattr(
+        "training.run_pipeline.register_model_in_mlflow", fail_if_called
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.call_reload_model_endpoint", fail_if_called
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        run_training_pipeline()
+
+    assert exc_info.value.code == 2
 
 
 def test_run_training_pipeline_continues_to_register_on_failed_model_quality(
@@ -620,6 +661,7 @@ def test_run_training_pipeline_continues_to_register_on_failed_model_quality(
         "model_quality_metrics": model_quality_metrics,
         "thresholds": SCHEMA_THRESHOLDS,
     }
+    assert result["status"] == "success"
     assert result["validation_report"] == expected_report
     assert result["registration"]["model_version"] == "9"
     written_report = json.loads(validation_report_path.read_text(encoding="utf-8"))

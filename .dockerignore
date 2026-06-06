@@ -54,7 +54,7 @@ archive_old_project
 pyproject.toml
 requirements.txt
 requirements-dev.txt
-requirements-train.txt
+# requirements-train.txt
 amvera.yml
 README.md
 LICENSE

@@ -245,6 +245,14 @@ def _expected_model_version(registration_result: dict[str, Any] | None) -> str |
     return str(model_version)
 
 
+def _env_flag_is_true(env_name: str, default: bool = False) -> bool:
+    raw_value = os.getenv(env_name)
+    if raw_value is None:
+        return default
+
+    return raw_value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _parse_int_env(env_name: str, default_value: int) -> int:
     raw_value = os.getenv(env_name)
     if raw_value is None:
@@ -750,6 +758,14 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
             errors = schema_result.errors
             error_message = "; ".join(errors) or "unknown validation error"
             logger.info("validation failed: %s", _sanitize_for_log(error_message))
+            logger.warning(
+                "VALIDATION_FAILED_NO_MODEL_REGISTERED: errors=%s metrics=%s",
+                _sanitize_for_log(errors),
+                _sanitize_for_log(validation_report.get("schema_metrics")),
+            )
+            if _env_flag_is_true("FAIL_CI_ON_VALIDATION_FAILED"):
+                raise SystemExit(2)
+
             return {
                 "status": "validation_failed",
                 "data_path": data_path,
@@ -852,6 +868,7 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
             _sanitize_for_log(serving_verification.get("loaded_model_version")),
         )
         return {
+            "status": "success",
             "data_path": data_path,
             "evidently_report": evidently_report,
             "validation_report": validation_report,
