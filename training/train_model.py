@@ -5,7 +5,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
-from sklearn.linear_model import Ridge
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, root_mean_squared_error
 from sklearn.pipeline import FeatureUnion, Pipeline
 
@@ -41,7 +41,7 @@ def train_password_model(df: pd.DataFrame) -> tuple[Pipeline, dict]:
                     ]
                 ),
             ),
-            ("model", Ridge()),
+            ("model", RandomForestRegressor()),
         ]
     )
 
@@ -61,7 +61,7 @@ def train_password_model(df: pd.DataFrame) -> tuple[Pipeline, dict]:
         "abs_mean_error_train": abs_mean_error_train,
         "prediction_target_mean_gap_train": prediction_target_mean_gap_train,
         "n_rows": int(len(df)),
-        "model_type": "Ridge",
+        "model_type": "RandomForestRegressor",
         "ngram_min": 1,
         "ngram_max": 3,
         "tfidf": True,
