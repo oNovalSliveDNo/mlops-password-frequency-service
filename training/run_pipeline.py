@@ -5,6 +5,7 @@ import os
 import re
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urljoin, urlparse, urlunparse
 import pandas as pd
@@ -644,12 +645,15 @@ def _merged_validation_report_dict(
     if thresholds is None and isinstance(schema_metrics, dict):
         thresholds = schema_metrics.get("thresholds")
 
+    model_quality_errors = list(getattr(model_quality_result, "errors", []))
     report = {
-        "is_valid": schema_result.is_valid and model_quality_result.is_valid,
-        "errors": [*schema_result.errors, *model_quality_result.errors],
+        "is_valid": schema_result.is_valid,
+        "errors": list(schema_result.errors),
         "n_rows": schema_result.n_rows,
         "columns": schema_result.columns,
         "schema_metrics": schema_metrics,
+        "model_quality_is_valid": model_quality_result.is_valid,
+        "model_quality_errors": model_quality_errors,
         "model_quality_metrics": model_quality_result.metrics,
     }
     if thresholds is not None:
@@ -679,6 +683,24 @@ def _write_evidently_warning_report(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return report
+
+
+def _run_non_blocking_model_quality_validation(df):
+    """Evaluate old-prod model quality without making it a pipeline gate."""
+    try:
+        return validate_model_quality_with_prod_model(df)
+    except Exception as exc:
+        logger.warning(
+            "Model-quality validation failed to run after data quality checks; "
+            "continuing pipeline: %s",
+            _sanitize_for_log(str(exc)),
+        )
+        return SimpleNamespace(
+            is_valid=False,
+            errors=[f"Model-quality validation failed to run: {exc}"],
+            metrics={},
+            scored_df=None,
+        )
 
 
 def _run_non_blocking_evidently_tests(
@@ -748,9 +770,14 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
         else:
             training_df = _read_validated_training_dataframe(data_path)
 
+        model, metrics = _timed_step(
+            "training", train_password_model, training_df[["Password", "Times"]]
+        )
+        logger.info("model trained")
+
         model_quality_result = _timed_step(
             "model-quality validation",
-            validate_model_quality_with_prod_model,
+            _run_non_blocking_model_quality_validation,
             training_df,
         )
         validation_report = _merged_validation_report_dict(
@@ -759,20 +786,16 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
         _write_validation_report(validation_report, _DEFAULT_VALIDATION_REPORT_PATH)
 
         if not model_quality_result.is_valid:
-            errors = validation_report["errors"]
+            model_quality_errors = list(getattr(model_quality_result, "errors", []))
             error_message = (
-                "; ".join(errors) or "unknown model quality validation error"
+                "; ".join(model_quality_errors)
+                or "unknown model quality validation error"
             )
-            logger.info(
-                "model quality validation failed: %s",
+            logger.warning(
+                "model quality validation failed after data quality checks passed; "
+                "continuing to train and register new model version: %s",
                 _sanitize_for_log(error_message),
             )
-            return {
-                "status": "validation_failed",
-                "data_path": data_path,
-                "validation_report": validation_report,
-                "errors": errors,
-            }
 
         evidently_input_df: pd.DataFrame | None = getattr(
             model_quality_result, "scored_df", None
@@ -784,16 +807,6 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
             _run_non_blocking_evidently_tests,
             evidently_input_df,
             _DEFAULT_EVIDENTLY_REPORT_PATH,
-        )
-        model, metrics = _timed_step(
-            "training", train_password_model, training_df[["Password", "Times"]]
-        )
-        logger.info("model trained")
-        model_artifact_path = _timed_step(
-            "model artifact saving",
-            save_model_artifact,
-            model,
-            _DEFAULT_MODEL_ARTIFACT_PATH,
         )
 
         registration_result = _timed_step(
@@ -811,6 +824,13 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
             registration_result,
         )
         logger.info("model alias verified: %s", _sanitize_for_log(registration_result))
+
+        model_artifact_path = _timed_step(
+            "model artifact saving",
+            save_model_artifact,
+            model,
+            _DEFAULT_MODEL_ARTIFACT_PATH,
+        )
         reload_result = _timed_step(
             "service reload", call_reload_model_endpoint, registration_result
         )
