@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,19 @@ _PRODUCTION_MODEL_ALIAS = "prod"
 logger = logging.getLogger(__name__)
 
 _SENSITIVE_LOG_KEY_PARTS = ("secret", "credential", "password", "token", "key")
+_SENSITIVE_ENV_NAMES = (
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "MLFLOW_TRACKING_PASSWORD",
+    "DOCKERHUB_TOKEN",
+    "SERVICE_RELOAD_SECRET",
+    "SERVICE_RELOAD_URL",
+    "GITLAB_TOKEN",
+    "GITLAB_TRIGGER_TOKEN",
+    "AMVERA_PASSWORD",
+)
 _REDACTED_LOG_VALUE = "[REDACTED]"
+_URL_CREDENTIALS_PATTERN = re.compile(r"(://)([^/\s:@]+):([^@/\s]+)@")
 
 
 def _is_sensitive_log_key(key: str) -> bool:
@@ -31,10 +44,25 @@ def _is_sensitive_log_key(key: str) -> bool:
     return any(part in normalized_key for part in _SENSITIVE_LOG_KEY_PARTS)
 
 
+def _secret_env_values() -> tuple[str, ...]:
+    """Collect configured secret values that must never appear in logs."""
+    return tuple(
+        value for env_name in _SENSITIVE_ENV_NAMES if (value := os.getenv(env_name))
+    )
+
+
+def _sanitize_string_for_log(value: str) -> str:
+    sanitized = value
+    for secret_value in _secret_env_values():
+        sanitized = sanitized.replace(secret_value, _REDACTED_LOG_VALUE)
+
+    return _URL_CREDENTIALS_PATTERN.sub(
+        rf"\1{_REDACTED_LOG_VALUE}:{_REDACTED_LOG_VALUE}@", sanitized
+    )
+
+
 def _sanitize_for_log(value: Any) -> Any:
     """Return a log-safe copy of a value by redacting known sensitive data."""
-    service_reload_secret = os.getenv("SERVICE_RELOAD_SECRET")
-
     if isinstance(value, dict):
         return {
             key: (
@@ -51,8 +79,8 @@ def _sanitize_for_log(value: Any) -> Any:
     if isinstance(value, tuple):
         return tuple(_sanitize_for_log(item) for item in value)
 
-    if isinstance(value, str) and service_reload_secret:
-        return value.replace(service_reload_secret, _REDACTED_LOG_VALUE)
+    if isinstance(value, str):
+        return _sanitize_string_for_log(value)
 
     return value
 
@@ -233,8 +261,8 @@ def _request_json_with_retries(method: str, url: str, **kwargs) -> dict[str, Any
                 time.sleep(_RELOAD_RETRY_DELAY_SECONDS)
 
     raise RuntimeError(
-        f"Serving check {method} {url} failed after {_RELOAD_ATTEMPTS} attempts. "
-        f"Last error: {_sanitize_for_log(last_error)}."
+        f"Serving check {method} {_sanitize_for_log(url)} failed after "
+        f"{_RELOAD_ATTEMPTS} attempts. Last error: {_sanitize_for_log(last_error)}."
     )
 
 

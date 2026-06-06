@@ -103,6 +103,11 @@ def load_model_from_mlflow(
     return model, metadata
 
 
+def _safe_reload_error(exc: Exception) -> str:
+    """Return a short public-safe category for the last reload failure."""
+    return f"model_reload_failed:{type(exc).__name__}"
+
+
 def get_model():
     global _last_reload_error, _last_reload_status, _model, _model_metadata
 
@@ -114,7 +119,7 @@ def get_model():
             _model, _model_metadata = load_model_from_mlflow()
         except Exception as exc:
             _last_reload_status = "failed"
-            _last_reload_error = str(exc)
+            _last_reload_error = _safe_reload_error(exc)
             raise
 
         _last_reload_status = "success"
@@ -144,7 +149,7 @@ def reload_model(expected_model_version: str | None = None) -> ModelLoadMetadata
             _ensure_expected_version_loaded(loaded_metadata)
         except Exception as exc:
             _last_reload_status = "failed"
-            _last_reload_error = str(exc)
+            _last_reload_error = _safe_reload_error(exc)
             raise
 
         _model = loaded_model

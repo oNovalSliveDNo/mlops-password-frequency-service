@@ -1,6 +1,10 @@
+import logging
+
+import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main
+import app.model_loader as model_loader
 from app.model_loader import ModelLoadMetadata, ModelServiceState
 
 
@@ -199,3 +203,93 @@ def test_model_status_returns_model_diagnostics(monkeypatch):
         "last_reload_status": "failed",
         "last_reload_error": "MLflow model version is not ready",
     }
+
+def test_predict_error_detail_does_not_expose_secret(monkeypatch, caplog):
+    secret = "predict-secret"
+    monkeypatch.setenv("MLFLOW_TRACKING_PASSWORD", secret)
+
+    def fake_predict_passwords(passwords):
+        raise RuntimeError(f"failed to load https://user:{secret}@mlflow.example")
+
+    monkeypatch.setattr(main, "predict_passwords", fake_predict_passwords)
+
+    with caplog.at_level(logging.ERROR):
+        response = client.post("/predict", json={"Password": ["password"]})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Model is currently unavailable"
+    assert secret not in response.text
+    assert secret not in caplog.text
+    assert "[REDACTED]" in caplog.text
+
+
+def test_trigger_error_detail_does_not_expose_secret(monkeypatch, caplog):
+    secret = "gitlab-trigger-secret"
+    monkeypatch.setenv("GITLAB_TRIGGER_TOKEN", secret)
+
+    def fake_trigger_training_pipeline(data_url: str):
+        raise RuntimeError(f"bad trigger token {secret}")
+
+    monkeypatch.setattr(
+        main, "trigger_training_pipeline", fake_trigger_training_pipeline
+    )
+
+    with caplog.at_level(logging.ERROR):
+        response = client.post(
+            "/trigger",
+            json={"data_url": "https://example.com/data.csv"},
+        )
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "GitLab trigger is not configured correctly"
+    assert secret not in response.text
+    assert secret not in caplog.text
+    assert "[REDACTED]" in caplog.text
+
+
+def test_reload_model_error_detail_does_not_expose_secret(monkeypatch, caplog):
+    secret = "reload-secret"
+    monkeypatch.setenv("SERVICE_RELOAD_SECRET", secret)
+    monkeypatch.setenv("MODEL_NAME", "passwords")
+
+    def fake_reload_model(expected_model_version=None):
+        raise RuntimeError(f"reload failed with token {secret}")
+
+    monkeypatch.setattr(main, "reload_model", fake_reload_model)
+
+    with caplog.at_level(logging.ERROR):
+        response = client.post(
+            "/reload_model",
+            headers={"X-Service-Token": secret},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Model reload failed"
+    assert secret not in response.text
+    assert secret not in caplog.text
+    assert "[REDACTED]" in caplog.text
+
+
+def test_health_last_reload_error_uses_safe_category(monkeypatch):
+    secret = "mlflow-password"
+    monkeypatch.setenv("MLFLOW_TRACKING_PASSWORD", secret)
+    model_loader.set_model_for_tests(None)
+
+    def fake_load_model_from_mlflow(expected_model_version=None):
+        raise RuntimeError(f"failed to load https://user:{secret}@mlflow.example")
+
+    monkeypatch.setattr(
+        model_loader,
+        "load_model_from_mlflow",
+        fake_load_model_from_mlflow,
+    )
+
+    with pytest.raises(RuntimeError):
+        model_loader.get_model()
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["last_reload_status"] == "failed"
+    assert response.json()["last_reload_error"] == "model_reload_failed:RuntimeError"
+    assert secret not in response.text

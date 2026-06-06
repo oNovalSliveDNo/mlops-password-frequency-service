@@ -1129,3 +1129,88 @@ def test_registration_alias_gate_rejects_unverified_alias_before_reload():
                 "verified_model_version": "1",
             }
         )
+
+def test_sanitize_for_log_redacts_all_configured_secret_env_values(monkeypatch):
+    from training.run_pipeline import _sanitize_for_log
+
+    secrets = {
+        "AWS_ACCESS_KEY_ID": "aws-access-secret",
+        "AWS_SECRET_ACCESS_KEY": "aws-secret-key",
+        "MLFLOW_TRACKING_PASSWORD": "mlflow-password",
+        "DOCKERHUB_TOKEN": "dockerhub-token",
+        "SERVICE_RELOAD_SECRET": "reload-secret",
+        "SERVICE_RELOAD_URL": "https://reload-user:reload-password@service.example/reload_model",
+        "GITLAB_TOKEN": "gitlab-token",
+        "GITLAB_TRIGGER_TOKEN": "gitlab-trigger-token",
+        "AMVERA_PASSWORD": "amvera-password",
+    }
+    for env_name, secret in secrets.items():
+        monkeypatch.setenv(env_name, secret)
+
+    value = {
+        "message": " ".join(secrets.values()),
+        "items": [
+            f"Authorization: Bearer {secrets['GITLAB_TOKEN']}",
+            (f"password={secrets['AMVERA_PASSWORD']}",),
+        ],
+        "callback_url": "https://user:inline-password@example.com/reload_model",
+        "headers": {"X-Service-Token": secrets["SERVICE_RELOAD_SECRET"]},
+    }
+
+    sanitized = _sanitize_for_log(value)
+    sanitized_text = repr(sanitized)
+
+    for secret in secrets.values():
+        assert secret not in sanitized_text
+    assert "inline-password" not in sanitized_text
+    assert sanitized["headers"]["X-Service-Token"] == "[REDACTED]"
+    assert "[REDACTED]" in sanitized_text
+
+
+def test_main_completed_log_redacts_all_configured_secret_env_values(
+    monkeypatch, caplog
+):
+    from training.run_pipeline import main
+
+    secrets = {
+        "AWS_ACCESS_KEY_ID": "aws-access-secret",
+        "AWS_SECRET_ACCESS_KEY": "aws-secret-key",
+        "MLFLOW_TRACKING_PASSWORD": "mlflow-password",
+        "DOCKERHUB_TOKEN": "dockerhub-token",
+        "SERVICE_RELOAD_SECRET": "reload-secret",
+        "SERVICE_RELOAD_URL": "https://reload-user:reload-password@service.example/reload_model",
+        "GITLAB_TOKEN": "gitlab-token",
+        "GITLAB_TRIGGER_TOKEN": "gitlab-trigger-token",
+        "AMVERA_PASSWORD": "amvera-password",
+    }
+    for env_name, secret in secrets.items():
+        monkeypatch.setenv(env_name, secret)
+
+    result = {
+        "status": "success",
+        "registration": {
+            "mlflow_url": f"https://mlflow-user:{secrets['MLFLOW_TRACKING_PASSWORD']}@mlflow.example",
+            "access_key": secrets["AWS_ACCESS_KEY_ID"],
+        },
+        "reload": {
+            "url": secrets["SERVICE_RELOAD_URL"],
+            "message": f"accepted {secrets['SERVICE_RELOAD_SECRET']}",
+        },
+        "serving_verification": {
+            "health": {"last_reload_error": None},
+            "predict": {
+                "url": "https://predict-user:predict-password@service.example/predict"
+            },
+        },
+        "tokens": list(secrets.values()),
+    }
+    monkeypatch.setattr("training.run_pipeline.run_training_pipeline", lambda: result)
+
+    with caplog.at_level(logging.INFO):
+        main()
+
+    assert "Training pipeline completed:" in caplog.text
+    for secret in secrets.values():
+        assert secret not in caplog.text
+    assert "predict-password" not in caplog.text
+    assert "[REDACTED]" in caplog.text

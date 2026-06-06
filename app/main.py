@@ -1,4 +1,7 @@
+import logging
 import os
+import re
+from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Response, status
 
@@ -15,6 +18,66 @@ from app.schemas import (
 )
 
 app = FastAPI(title="Password Frequency Service")
+logger = logging.getLogger(__name__)
+
+_SENSITIVE_LOG_KEY_PARTS = ("secret", "credential", "password", "token", "key")
+_SENSITIVE_ENV_NAMES = (
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "MLFLOW_TRACKING_PASSWORD",
+    "DOCKERHUB_TOKEN",
+    "SERVICE_RELOAD_SECRET",
+    "SERVICE_RELOAD_URL",
+    "GITLAB_TOKEN",
+    "GITLAB_TRIGGER_TOKEN",
+    "AMVERA_PASSWORD",
+)
+_REDACTED_LOG_VALUE = "[REDACTED]"
+_URL_CREDENTIALS_PATTERN = re.compile(r"(://)([^/\s:@]+):([^@/\s]+)@")
+
+
+def _is_sensitive_log_key(key: str) -> bool:
+    normalized_key = key.lower()
+    return any(part in normalized_key for part in _SENSITIVE_LOG_KEY_PARTS)
+
+
+def _secret_env_values() -> tuple[str, ...]:
+    return tuple(
+        value for env_name in _SENSITIVE_ENV_NAMES if (value := os.getenv(env_name))
+    )
+
+
+def _sanitize_for_log(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: (
+                _REDACTED_LOG_VALUE
+                if _is_sensitive_log_key(str(key))
+                else _sanitize_for_log(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_sanitize_for_log(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_for_log(item) for item in value)
+    if isinstance(value, str):
+        sanitized = value
+        for secret_value in _secret_env_values():
+            sanitized = sanitized.replace(secret_value, _REDACTED_LOG_VALUE)
+        return _URL_CREDENTIALS_PATTERN.sub(
+            rf"\1{_REDACTED_LOG_VALUE}:{_REDACTED_LOG_VALUE}@", sanitized
+        )
+    return value
+
+
+def _log_endpoint_error(endpoint: str, exc: Exception) -> None:
+    logger.error(
+        "%s failed with %s: %s",
+        endpoint,
+        type(exc).__name__,
+        _sanitize_for_log(str(exc)),
+    )
 
 
 def _current_health_response() -> HealthResponse:
@@ -54,14 +117,16 @@ def predict(request: PredictRequest) -> PredictResponse:
     try:
         predictions = predict_passwords(request.Password)
     except RuntimeError as exc:
+        _log_endpoint_error("/predict", exc)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Model is unavailable: {exc}",
+            detail="Model is currently unavailable",
         ) from exc
     except Exception as exc:
+        _log_endpoint_error("/predict", exc)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Failed to generate predictions: {exc}",
+            detail="Failed to generate predictions",
         ) from exc
 
     return PredictResponse(Times=predictions)
@@ -72,19 +137,22 @@ def trigger(request: TriggerRequest, response: Response) -> TriggerResponse:
     try:
         result = trigger_training_pipeline(data_url=request.data_url)
     except ValueError as exc:
+        _log_endpoint_error("/trigger", exc)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid training trigger request: {exc}",
+            detail="Invalid training trigger request",
         ) from exc
     except RuntimeError as exc:
+        _log_endpoint_error("/trigger", exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"GitLab trigger is not configured correctly: {exc}",
+            detail="GitLab trigger is not configured correctly",
         ) from exc
     except Exception as exc:
+        _log_endpoint_error("/trigger", exc)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Failed to start GitLab training pipeline: {exc}",
+            detail="Failed to start GitLab training pipeline",
         ) from exc
 
     response.status_code = status.HTTP_202_ACCEPTED
@@ -146,14 +214,16 @@ def reload_model_endpoint(
     try:
         load_metadata = reload_model(expected_model_version=expected_model_version)
     except RuntimeError as exc:
+        _log_endpoint_error("/reload_model", exc)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Model reload failed: {exc}",
+            detail="Model reload failed",
         ) from exc
     except Exception as exc:
+        _log_endpoint_error("/reload_model", exc)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Unexpected model reload error: {exc}",
+            detail="Unexpected model reload error",
         ) from exc
 
     return ReloadResponse(
