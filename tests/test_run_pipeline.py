@@ -388,6 +388,48 @@ def test_verify_serving_after_reload_checks_predict_then_health_diagnostics(
     ]
 
 
+def test_verify_serving_after_reload_compares_against_trained_model(monkeypatch):
+    monkeypatch.setenv("SERVICE_RELOAD_URL", "https://service.example/reload_model")
+    monkeypatch.setenv("SERVICE_SERVING_VERIFICATION_ROUNDS", "1")
+    monkeypatch.setenv("SERVICE_PREDICT_MAX_ABS_ERROR_TOLERANCE", "0.05")
+    training_df = pipeline_pd.DataFrame({"Password": ["alpha"], "Times": [99.0]})
+
+    class LocalModel:
+        def predict(self, passwords):
+            assert passwords == ["alpha"]
+            return [1.0]
+
+    def fake_request(method, url, timeout, **kwargs):
+        if method == "GET":
+            return FakeResponse(
+                json_body={
+                    "status": "ok",
+                    "model_loaded": True,
+                    "loaded_version": "12",
+                    "last_reload_status": "success",
+                }
+            )
+
+        return FakeResponse(
+            json_body={"Times": [1.01]}, headers={"X-Model-Version": "12"}
+        )
+
+    monkeypatch.setattr(
+        "training.run_pipeline.requests.request", fake_request, raising=False
+    )
+
+    result = verify_serving_after_reload(
+        {"model_name": "passwords", "model_alias": "prod", "model_version": "12"},
+        {"status": "model_reloaded", "loaded_model_version": "12"},
+        training_df,
+        LocalModel(),
+    )
+
+    assert result["status"] == "verified"
+    assert result["predict"]["max_abs_error"] == pytest.approx(0.01)
+    assert result["predict"]["prediction_reference"] == "local_model_prediction"
+
+
 def test_verify_serving_after_reload_rejects_prediction_error(monkeypatch):
     monkeypatch.setenv("SERVICE_RELOAD_URL", "https://service.example/reload_model")
     monkeypatch.setenv("SERVICE_SERVING_VERIFICATION_ROUNDS", "1")
@@ -1194,9 +1236,17 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
             "token": "super-secret",
         }
 
-    def verify_serving(registration_result, reload_result, serving_training_df):
+    def verify_serving(
+        registration_result, reload_result, serving_training_df, trained_model
+    ):
         calls.append(
-            ("verify_serving", registration_result, reload_result, serving_training_df)
+            (
+                "verify_serving",
+                registration_result,
+                reload_result,
+                serving_training_df,
+                trained_model,
+            )
         )
         return {
             "status": "verified",
@@ -1264,6 +1314,7 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
             "token": "super-secret",
         },
         training_df,
+        "model",
     )
     assert calls[5] == ("save", "model", "artifacts/model.joblib")
     assert calls[6][0] == "model_quality"
@@ -1545,9 +1596,15 @@ def test_run_training_pipeline_raises_when_serving_verification_fails(
 
     calls = _stub_successful_pipeline_until_serving_verification(monkeypatch)
 
-    def verify_serving(registration_result, reload_result, training_df):
+    def verify_serving(registration_result, reload_result, training_df, trained_model):
         calls.append(
-            ("verify_serving", registration_result, reload_result, training_df)
+            (
+                "verify_serving",
+                registration_result,
+                reload_result,
+                training_df,
+                trained_model,
+            )
         )
         raise RuntimeError("loaded version is stale")
 

@@ -385,6 +385,55 @@ def _response_header(headers: dict[str, Any] | None, header_name: str) -> str | 
     return None
 
 
+def _prediction_values(predictions: Any) -> list[float]:
+    if hasattr(predictions, "to_numpy"):
+        values = predictions.to_numpy().ravel().tolist()
+    elif hasattr(predictions, "ravel"):
+        values = predictions.ravel().tolist()
+    elif hasattr(predictions, "tolist"):
+        values = predictions.tolist()
+    else:
+        values = list(predictions)
+
+    prediction_values: list[float] = []
+    for prediction in values:
+        try:
+            prediction_value = float(prediction)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Local model returned non-numeric predictions for serving check: "
+                f"{_sanitize_for_log(values)!r}."
+            ) from exc
+        if not math.isfinite(prediction_value):
+            raise RuntimeError(
+                "Local model returned non-finite predictions for serving check: "
+                f"{_sanitize_for_log(values)!r}."
+            )
+        prediction_values.append(prediction_value)
+
+    return prediction_values
+
+
+def _serving_expected_predictions(
+    model: Any | None, sample_passwords: list[str], sample_df: pd.DataFrame
+) -> tuple[list[float], str]:
+    if model is None:
+        return [
+            float(math.log10(float(times) + 1.0))
+            for times in sample_df["Times"].tolist()
+        ], "label_log10_times_plus_1"
+
+    predictions = model.predict(sample_passwords)
+    prediction_values = _prediction_values(predictions)
+    if len(prediction_values) != len(sample_passwords):
+        raise RuntimeError(
+            "Local model returned an unexpected prediction count for serving check: "
+            f"{len(prediction_values)} != {len(sample_passwords)}."
+        )
+
+    return prediction_values, "local_model_prediction"
+
+
 def _validate_predict_response(
     predict_result: dict[str, Any],
     passwords: list[str],
@@ -494,6 +543,7 @@ def verify_serving_after_reload(
     registration_result: dict[str, Any] | None,
     reload_result: dict[str, Any],
     training_df: pd.DataFrame,
+    trained_model: Any | None = None,
 ) -> dict[str, Any]:
     """Verify that the serving app exposes the reloaded model and predicts."""
     if reload_result.get("status") == "skipped":
@@ -518,9 +568,9 @@ def verify_serving_after_reload(
 
     sample_df = _serving_verification_sample(training_df)
     sample_passwords = [str(password) for password in sample_df["Password"].tolist()]
-    expected_targets = [
-        float(math.log10(float(times) + 1.0)) for times in sample_df["Times"].tolist()
-    ]
+    expected_targets, prediction_reference = _serving_expected_predictions(
+        trained_model, sample_passwords, sample_df
+    )
     tolerance = _parse_float_env(
         "SERVICE_PREDICT_MAX_ABS_ERROR_TOLERANCE",
         _SERVING_PREDICT_MAX_ABS_ERROR_TOLERANCE,
@@ -661,6 +711,7 @@ def verify_serving_after_reload(
             "max_abs_error": max_abs_error,
             "tolerance": tolerance,
             "target_scale": _SERVING_PREDICTION_TARGET_SCALE,
+            "prediction_reference": prediction_reference,
             "sample_passwords": sample_passwords[:5],
             "checks": predict_checks,
         },
@@ -1009,6 +1060,7 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
             registration_result,
             reload_result,
             training_df,
+            model,
         )
         pipeline_status = "success"
         logger.info(
