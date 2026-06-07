@@ -12,6 +12,7 @@ from training.run_pipeline import (
     _RELOAD_TIMEOUT_SECONDS,
 )
 from training.run_pipeline import (
+    _serving_verification_sample,
     call_reload_model_endpoint,
     pd as pipeline_pd,
     verify_serving_after_reload,
@@ -258,6 +259,26 @@ def test_call_reload_model_endpoint_returns_alias_updated_status_on_failure(
     assert "super-secret" not in str(result)
 
 
+def test_serving_verification_sample_is_deterministically_stratified(monkeypatch):
+    monkeypatch.setenv("SERVICE_PREDICT_CHECK_ROWS", "20")
+    training_df = pipeline_pd.DataFrame(
+        {
+            "Password": [f"zero-{index}" for index in range(30)]
+            + [f"one-{index}" for index in range(30)],
+            "Times": [0.0] * 30 + [1.0] * 30,
+        }
+    )
+
+    sample_df = _serving_verification_sample(training_df)
+    repeated_sample_df = _serving_verification_sample(training_df)
+
+    assert len(sample_df.index) == 20
+    assert sample_df.equals(repeated_sample_df)
+    assert set(sample_df["Times"].tolist()) == {0.0, 1.0}
+    assert sample_df["Times"].tolist().count(0.0) == 10
+    assert sample_df["Times"].tolist().count(1.0) == 10
+
+
 def test_verify_serving_after_reload_checks_predict_then_health_diagnostics(
     monkeypatch,
 ):
@@ -437,7 +458,7 @@ def test_verify_serving_after_reload_checks_configured_replica_state_urls(monkey
     ]
 
 
-def test_verify_serving_after_reload_warns_on_stale_state_version(monkeypatch, caplog):
+def test_verify_serving_after_reload_rejects_stale_state_version(monkeypatch, caplog):
     monkeypatch.setenv("SERVICE_HEALTH_URL", "https://service.example/health")
     monkeypatch.setenv("SERVICE_PREDICT_URL", "https://service.example/predict")
     monkeypatch.setenv("SERVICE_SERVING_VERIFICATION_ROUNDS", "1")
@@ -459,14 +480,17 @@ def test_verify_serving_after_reload_warns_on_stale_state_version(monkeypatch, c
         "training.run_pipeline.requests.request", fake_request, raising=False
     )
     with caplog.at_level(logging.WARNING):
-        result = verify_serving_after_reload(
-            {"model_name": "passwords", "model_alias": "prod", "model_version": "12"},
-            {"status": "model_reloaded"},
-            training_df,
-        )
+        with pytest.raises(RuntimeError, match="unexpected loaded_version"):
+            verify_serving_after_reload(
+                {
+                    "model_name": "passwords",
+                    "model_alias": "prod",
+                    "model_version": "12",
+                },
+                {"status": "model_reloaded"},
+                training_df,
+            )
 
-    assert result["status"] == "verified"
-    assert result["replicas"][0]["warnings"]
     assert "unexpected model version" in caplog.text
 
 
@@ -1480,67 +1504,12 @@ def test_run_training_pipeline_continues_when_reload_fails_after_alias_update(
     }
 
 
-def test_run_training_pipeline_warns_when_serving_verification_fails_by_default(
-    monkeypatch, caplog
-):
-    from training.run_pipeline import run_training_pipeline
-
-    calls = _stub_successful_pipeline_until_serving_verification(monkeypatch)
-    monkeypatch.delenv("FAIL_CI_ON_SERVING_VERIFICATION_FAILED", raising=False)
-    monkeypatch.setenv("SERVICE_RELOAD_SECRET", "super-secret")
-
-    def verify_serving(registration_result, reload_result, training_df):
-        calls.append(
-            ("verify_serving", registration_result, reload_result, training_df)
-        )
-        raise RuntimeError("loaded version is stale for super-secret")
-
-    monkeypatch.setattr(
-        "training.run_pipeline.verify_serving_after_reload", verify_serving
-    )
-
-    with caplog.at_level(logging.INFO):
-        result = run_training_pipeline()
-
-    assert [call[0] for call in calls] == ["reload", "verify_serving"]
-    assert result["status"] == "success_with_serving_verification_warning"
-    assert result["reload"] == {"status": "model_reloaded"}
-    assert result["serving_verification"] == {
-        "status": "warning",
-        "reason": "serving verification failed after reload",
-        "error_type": "RuntimeError",
-        "error": "loaded version is stale for [REDACTED]",
-    }
-    assert (
-        "serving verification failed after service reload; continuing because "
-        "FAIL_CI_ON_SERVING_VERIFICATION_FAILED is not enabled" in caplog.text
-    )
-    assert "super-secret" not in caplog.text
-    _assert_duration_logs(
-        caplog,
-        [
-            "data download",
-            "schema validation",
-            "training",
-            "model-quality validation",
-            "Evidently",
-            "MLflow registration",
-            "alias verification",
-            "model artifact saving",
-            "service reload",
-            "serving verification",
-            "total pipeline",
-        ],
-    )
-
-
-def test_run_training_pipeline_raises_when_serving_verification_strict_flag_enabled(
+def test_run_training_pipeline_raises_when_serving_verification_fails(
     monkeypatch,
 ):
     from training.run_pipeline import run_training_pipeline
 
     calls = _stub_successful_pipeline_until_serving_verification(monkeypatch)
-    monkeypatch.setenv("FAIL_CI_ON_SERVING_VERIFICATION_FAILED", "true")
 
     def verify_serving(registration_result, reload_result, training_df):
         calls.append(

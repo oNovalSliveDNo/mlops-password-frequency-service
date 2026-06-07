@@ -19,13 +19,13 @@ _SERVING_VERIFICATION_SAMPLE_SIZE = 20
 _SERVING_VERIFICATION_MIN_SAMPLE_SIZE = 20
 _SERVING_VERIFICATION_MAX_SAMPLE_SIZE = 50
 _SERVING_VERIFICATION_ROUNDS = 3
-_SERVING_PREDICT_MAX_ABS_ERROR_TOLERANCE = 0.5
+_SERVING_PREDICTION_TARGET_SCALE = "log10_times_plus_1"
+_SERVING_PREDICT_MAX_ABS_ERROR_TOLERANCE = 0.05
 _DEFAULT_DATA_PATH = "artifacts/new_data.csv"
 _DEFAULT_MODEL_ARTIFACT_PATH = "artifacts/model.joblib"
 _DEFAULT_VALIDATION_REPORT_PATH = "validation_reports/validation_report.json"
 _DEFAULT_EVIDENTLY_REPORT_PATH = "reports/tests.json"
 _PRODUCTION_MODEL_ALIAS = "prod"
-_FAIL_CI_ON_SERVING_VERIFICATION_FAILED_ENV = "FAIL_CI_ON_SERVING_VERIFICATION_FAILED"
 
 
 logger = logging.getLogger(__name__)
@@ -304,7 +304,39 @@ def _serving_verification_sample(training_df: pd.DataFrame) -> pd.DataFrame:
         )
 
     row_count = min(sample_size, len(check_df.index))
-    return check_df.head(row_count).reset_index(drop=True)
+    strata = list(check_df.groupby("Times", sort=True, dropna=True))
+    if not strata:
+        raise RuntimeError(
+            "training_df does not contain any valid Times strata for serving "
+            "prediction verification."
+        )
+
+    samples: list[pd.DataFrame] = []
+    remaining_slots = row_count
+    remaining_strata = len(strata)
+    for _, stratum_df in strata:
+        if remaining_slots <= 0:
+            break
+
+        stratum_quota = max(1, remaining_slots // remaining_strata)
+        stratum_count = min(len(stratum_df.index), stratum_quota)
+        samples.append(stratum_df.sample(n=stratum_count, random_state=42).sort_index())
+        remaining_slots -= stratum_count
+        remaining_strata -= 1
+
+    sampled_df = pd.concat(samples).sort_values(["Times", "Password"], kind="stable")
+    if len(sampled_df.index) < row_count:
+        sampled_indices = set(sampled_df.index.tolist())
+        remainder_count = row_count - len(sampled_df.index)
+        remainder_df = check_df.loc[~check_df.index.isin(sampled_indices)]
+        sampled_df = pd.concat(
+            [
+                sampled_df,
+                remainder_df.sample(n=remainder_count, random_state=42),
+            ]
+        ).sort_values(["Times", "Password"], kind="stable")
+
+    return sampled_df.reset_index(drop=True)
 
 
 def _assert_serving_state(
@@ -567,33 +599,35 @@ def verify_serving_after_reload(
                     "GET", state_url, include_response_metadata=True
                 )
             except RuntimeError as exc:
-                diagnostic_warning = (
-                    "Serving state diagnostic request failed for "
+                raise RuntimeError(
+                    "Serving state check request failed for "
                     f"{_sanitize_for_log(state_url)}: {_sanitize_for_log(str(exc))}."
-                )
-                logger.warning(diagnostic_warning)
-                replica_state = {
-                    "round": round_number,
-                    "url": state_url,
-                    "state": None,
-                    "warnings": [diagnostic_warning],
-                }
-            else:
-                if not isinstance(state_response, SimpleNamespace):
-                    raise RuntimeError(
-                        "Serving state diagnostic did not return response metadata."
-                    )
+                ) from exc
 
-                state_warnings = _assert_serving_state(
-                    state_response.body, state_url, expected_version
+            if not isinstance(state_response, SimpleNamespace):
+                raise RuntimeError(
+                    "Serving state diagnostic did not return response metadata."
                 )
-                replica_state = {
-                    "round": round_number,
-                    "url": state_url,
-                    "state": state_response.body,
-                    "http_status": state_response.status_code,
-                    "warnings": state_warnings,
-                }
+            state_warnings = _assert_serving_state(
+                state_response.body, state_url, expected_version
+            )
+            if (
+                expected_version is not None
+                and state_response.body.get("loaded_version") != expected_version
+            ):
+                raise RuntimeError(
+                    "Serving state check returned unexpected loaded_version "
+                    f"for {_sanitize_for_log(state_url)}: "
+                    f"{state_response.body.get('loaded_version')!r} "
+                    f"!= {expected_version!r}."
+                )
+            replica_state = {
+                "round": round_number,
+                "url": state_url,
+                "state": state_response.body,
+                "http_status": state_response.status_code,
+                "warnings": state_warnings,
+            }
 
             replica_checks.append(replica_state)
             latest_replica_states_by_url[state_url] = replica_state
@@ -626,7 +660,7 @@ def verify_serving_after_reload(
             "checked_rows": len(sample_passwords),
             "max_abs_error": max_abs_error,
             "tolerance": tolerance,
-            "target_scale": "log10_times_plus_1",
+            "target_scale": _SERVING_PREDICTION_TARGET_SCALE,
             "sample_passwords": sample_passwords[:5],
             "checks": predict_checks,
         },
@@ -967,32 +1001,14 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
         logger.info(
             "service reload response received: %s", _sanitize_for_log(reload_result)
         )
-        try:
-            serving_verification = _timed_step(
-                "serving verification",
-                verify_serving_after_reload,
-                registration_result,
-                reload_result,
-                training_df,
-            )
-            pipeline_status = "success"
-        except Exception as exc:
-            if _env_flag_is_true(_FAIL_CI_ON_SERVING_VERIFICATION_FAILED_ENV):
-                raise
-
-            serving_verification = {
-                "status": "warning",
-                "reason": "serving verification failed after reload",
-                "error_type": type(exc).__name__,
-                "error": str(_sanitize_for_log(str(exc))),
-            }
-            pipeline_status = "success_with_serving_verification_warning"
-            logger.warning(
-                "serving verification failed after service reload; continuing "
-                "because %s is not enabled: %s",
-                _FAIL_CI_ON_SERVING_VERIFICATION_FAILED_ENV,
-                _sanitize_for_log(str(exc)),
-            )
+        serving_verification = _timed_step(
+            "serving verification",
+            verify_serving_after_reload,
+            registration_result,
+            reload_result,
+            training_df,
+        )
+        pipeline_status = "success"
         logger.info(
             "service state checked: %s", _sanitize_for_log(serving_verification)
         )

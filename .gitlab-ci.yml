@@ -21,6 +21,8 @@ variables:
   PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
   DOCKER_IMAGE: "$DOCKERHUB_USERNAME/mlops-password-frequency-service"
   TRAINING_IMAGE: "python:3.10-slim"
+  FAIL_CI_ON_SERVING_VERIFICATION_FAILED: "true"
+  SERVICE_PREDICT_MAX_ABS_ERROR_TOLERANCE: "0.05"
 
 cache:
   paths:
