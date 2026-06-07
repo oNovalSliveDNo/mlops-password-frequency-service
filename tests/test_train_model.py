@@ -20,6 +20,15 @@ def test_train_password_model_returns_model_and_metrics():
     assert hasattr(model, "predict")
     assert "rmse_train" in metrics
 
+    regressor = model.named_steps["model"]
+    assert regressor.n_estimators == 50
+    assert regressor.max_depth == 12
+    assert regressor.random_state == 42
+    assert regressor.n_jobs == 1
+    assert metrics["model_n_estimators"] == "50"
+    assert metrics["model_max_depth"] == "12"
+    assert metrics["model_random_state"] == "42"
+    assert metrics["model_n_jobs"] == "1"
     predictions = model.predict(df["Password"])
 
     assert len(predictions) == len(df)

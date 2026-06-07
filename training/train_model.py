@@ -12,6 +12,14 @@ from sklearn.pipeline import FeatureUnion, Pipeline
 from training.entropy import TextEntropyTransformer
 
 
+RANDOM_FOREST_PARAMS = {
+    "n_estimators": 50,
+    "max_depth": 12,
+    "random_state": 42,
+    "n_jobs": 1,
+}
+
+
 def train_password_model(df: pd.DataFrame) -> tuple[Pipeline, dict]:
     passwords = df["Password"]
     times = pd.to_numeric(df["Times"])
@@ -41,7 +49,7 @@ def train_password_model(df: pd.DataFrame) -> tuple[Pipeline, dict]:
                     ]
                 ),
             ),
-            ("model", RandomForestRegressor()),
+            ("model", RandomForestRegressor(**RANDOM_FOREST_PARAMS)),
         ]
     )
 
@@ -62,6 +70,10 @@ def train_password_model(df: pd.DataFrame) -> tuple[Pipeline, dict]:
         "prediction_target_mean_gap_train": prediction_target_mean_gap_train,
         "n_rows": int(len(df)),
         "model_type": "RandomForestRegressor",
+        "model_n_estimators": str(RANDOM_FOREST_PARAMS["n_estimators"]),
+        "model_max_depth": str(RANDOM_FOREST_PARAMS["max_depth"]),
+        "model_random_state": str(RANDOM_FOREST_PARAMS["random_state"]),
+        "model_n_jobs": str(RANDOM_FOREST_PARAMS["n_jobs"]),
         "ngram_min": 1,
         "ngram_max": 3,
         "tfidf": True,
