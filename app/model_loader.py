@@ -186,7 +186,13 @@ def _mark_alias_check_failed(exc: Exception) -> None:
 
 
 def ensure_current_alias_model_loaded() -> None:
-    """Auto-reload the loaded model when the configured alias moves."""
+    """Best-effort safety net: auto-reload only if the configured alias moves.
+
+    Training must still call /reload_model explicitly and verify the loaded
+    version; this fallback only protects long-lived service processes from
+    serving a stale alias when the primary reload path has already failed
+    outside the request path.
+    """
     loaded_model, loaded_metadata = _snapshot_loaded_model()
     if loaded_model is None:
         return

@@ -743,23 +743,37 @@ def call_reload_model_endpoint(
                 time.sleep(_RELOAD_RETRY_DELAY_SECONDS)
 
     sanitized_last_error = _sanitize_for_log(last_error)
-    logger.warning(
-        "service reload failed after MLflow alias update; relying on /predict "
-        "auto-reload fallback for alias %r. Last error: %s",
+    logger.error(
+        "service reload failed after MLflow alias update for alias %r. Last error: %s",
         (registration_result or {}).get("model_alias", _PRODUCTION_MODEL_ALIAS),
         sanitized_last_error,
     )
-    return {
-        "status": "reload_failed_but_alias_updated",
-        "reason": "service reload endpoint failed after MLflow alias update",
-        "attempts": _RELOAD_ATTEMPTS,
-        "last_error": sanitized_last_error,
-        "model_name": (registration_result or {}).get("model_name"),
-        "model_alias": (registration_result or {}).get(
-            "model_alias", _PRODUCTION_MODEL_ALIAS
-        ),
-        "expected_model_version": (registration_result or {}).get("model_version"),
-    }
+    raise RuntimeError(
+        "Service reload endpoint failed after MLflow alias update "
+        f"after {_RELOAD_ATTEMPTS} attempts. Last error: {sanitized_last_error}"
+    )
+
+
+def _ensure_reload_loaded_registered_version(
+    reload_result: dict[str, Any], registration_result: dict[str, Any]
+) -> None:
+    """Require reload response to confirm the newly registered model version."""
+    if reload_result.get("status") == "skipped":
+        return
+
+    expected_model_version = registration_result.get("model_version")
+    loaded_model_version = reload_result.get("loaded_model_version")
+
+    if (
+        expected_model_version is None
+        or loaded_model_version is None
+        or str(loaded_model_version) != str(expected_model_version)
+    ):
+        raise RuntimeError(
+            "Service reload did not load the registered MLflow model version: "
+            f"loaded_model_version={loaded_model_version!r}, "
+            f"registered_model_version={expected_model_version!r}."
+        )
 
 
 def _read_validated_training_dataframe(data_path: str):
@@ -997,6 +1011,12 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
         )
         reload_result = _timed_step(
             "service reload", call_reload_model_endpoint, registration_result
+        )
+        _timed_step(
+            "reload version verification",
+            _ensure_reload_loaded_registered_version,
+            reload_result,
+            registration_result,
         )
         logger.info(
             "service reload response received: %s", _sanitize_for_log(reload_result)

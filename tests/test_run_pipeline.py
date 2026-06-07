@@ -216,7 +216,7 @@ def test_call_reload_model_endpoint_returns_status_for_non_json(monkeypatch):
     assert call_reload_model_endpoint() == {"status": "success", "http_status": 204}
 
 
-def test_call_reload_model_endpoint_returns_alias_updated_status_on_failure(
+def test_call_reload_model_endpoint_raises_on_failure_after_alias_update(
     monkeypatch,
 ):
     monkeypatch.setenv("SERVICE_RELOAD_URL", "https://service.example/reload_model")
@@ -237,26 +237,22 @@ def test_call_reload_model_endpoint_returns_alias_updated_status_on_failure(
     monkeypatch.setattr("training.run_pipeline.requests.post", fake_post)
     monkeypatch.setattr("training.run_pipeline.time.sleep", sleeps.append)
 
-    result = call_reload_model_endpoint(
-        {
-            "model_name": "passwords",
-            "model_alias": "prod",
-            "model_version": "12",
-        }
-    )
+    with pytest.raises(
+        RuntimeError,
+        match="Service reload endpoint failed after MLflow alias update",
+    ) as exc_info:
+        call_reload_model_endpoint(
+            {
+                "model_name": "passwords",
+                "model_alias": "prod",
+                "model_version": "12",
+            }
+        )
 
     assert attempts == _RELOAD_ATTEMPTS
     assert sleeps == [_RELOAD_RETRY_DELAY_SECONDS] * (_RELOAD_ATTEMPTS - 1)
-    assert result == {
-        "status": "reload_failed_but_alias_updated",
-        "reason": "service reload endpoint failed after MLflow alias update",
-        "attempts": _RELOAD_ATTEMPTS,
-        "last_error": "ConnectionError: network failure with [REDACTED]",
-        "model_name": "passwords",
-        "model_alias": "prod",
-        "expected_model_version": "12",
-    }
-    assert "super-secret" not in str(result)
+    assert "ConnectionError: network failure with [REDACTED]" in str(exc_info.value)
+    assert "super-secret" not in str(exc_info.value)
 
 
 def test_serving_verification_sample_is_deterministically_stratified(monkeypatch):
@@ -745,6 +741,7 @@ def test_run_training_pipeline_continues_to_register_on_failed_model_quality(
             "alias verification",
             "model artifact saving",
             "service reload",
+            "reload version verification",
             "serving verification",
             "total pipeline",
         ],
@@ -1181,7 +1178,11 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
 
     def reload_model(result=None):
         calls.append(("reload", result))
-        return {"status": "model_reloaded", "token": "super-secret"}
+        return {
+            "status": "model_reloaded",
+            "loaded_model_version": result["model_version"],
+            "token": "super-secret",
+        }
 
     def verify_serving(registration_result, reload_result, serving_training_df):
         calls.append(
@@ -1245,11 +1246,19 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
     assert calls[7] == (
         "verify_serving",
         registration_result,
-        {"status": "model_reloaded", "token": "super-secret"},
+        {
+            "status": "model_reloaded",
+            "loaded_model_version": "1",
+            "token": "super-secret",
+        },
         training_df,
     )
     assert result["validation_report"] == merged_validation_report
-    assert result["reload"] == {"status": "model_reloaded", "token": "super-secret"}
+    assert result["reload"] == {
+        "status": "model_reloaded",
+        "loaded_model_version": "1",
+        "token": "super-secret",
+    }
     assert result["serving_verification"] == {
         "status": "verified",
         "loaded_model_version": "1",
@@ -1262,7 +1271,7 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
         in caplog.text
     )
     assert (
-        "service reload response received: {'status': 'model_reloaded', 'token': '[REDACTED]'}"
+        "service reload response received: {'status': 'model_reloaded', 'loaded_model_version': '1', 'token': '[REDACTED]'}"
         in caplog.text
     )
     assert "super-secret" not in caplog.text
@@ -1278,6 +1287,7 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
             "alias verification",
             "model artifact saving",
             "service reload",
+            "reload version verification",
             "serving verification",
             "total pipeline",
         ],
@@ -1450,7 +1460,10 @@ def _stub_successful_pipeline_until_serving_verification(
 
     def reload_model(registration_result=None):
         calls.append(("reload", registration_result))
-        return {"status": "model_reloaded"}
+        return {
+            "status": "model_reloaded",
+            "loaded_model_version": registration_result["model_version"],
+        }
 
     monkeypatch.setattr(
         "training.run_pipeline.call_reload_model_endpoint", reload_model
@@ -1458,20 +1471,16 @@ def _stub_successful_pipeline_until_serving_verification(
     return calls
 
 
-def test_run_training_pipeline_continues_when_reload_fails_after_alias_update(
+def test_run_training_pipeline_raises_when_reload_result_lacks_loaded_version(
     monkeypatch,
 ):
     from training.run_pipeline import run_training_pipeline
 
     calls = _stub_successful_pipeline_until_serving_verification(monkeypatch)
     reload_result = {
-        "status": "reload_failed_but_alias_updated",
-        "reason": "service reload endpoint failed after MLflow alias update",
-        "attempts": _RELOAD_ATTEMPTS,
-        "last_error": "ReadTimeout",
+        "status": "model_reloaded",
         "model_name": "passwords",
         "model_alias": "prod",
-        "expected_model_version": "1",
     }
 
     def reload_model(registration_result=None):
@@ -1479,11 +1488,7 @@ def test_run_training_pipeline_continues_when_reload_fails_after_alias_update(
         return reload_result
 
     def verify_serving(registration_result, actual_reload_result, training_df):
-        calls.append(("verify_serving", registration_result, actual_reload_result))
-        return {
-            "status": "verified",
-            "loaded_model_version": registration_result["model_version"],
-        }
+        pytest.fail("serving verification must not run after reload version mismatch")
 
     monkeypatch.setattr(
         "training.run_pipeline.call_reload_model_endpoint", reload_model
@@ -1492,16 +1497,43 @@ def test_run_training_pipeline_continues_when_reload_fails_after_alias_update(
         "training.run_pipeline.verify_serving_after_reload", verify_serving
     )
 
-    result = run_training_pipeline()
+    with pytest.raises(
+        RuntimeError,
+        match="Service reload did not load the registered MLflow model version",
+    ):
+        run_training_pipeline()
 
-    assert [call[0] for call in calls] == ["reload", "verify_serving"]
-    assert calls[1][2] is reload_result
-    assert result["status"] == "success"
-    assert result["reload"] is reload_result
-    assert result["serving_verification"] == {
-        "status": "verified",
-        "loaded_model_version": "1",
-    }
+    assert [call[0] for call in calls] == ["reload"]
+
+
+def test_run_training_pipeline_raises_when_reload_loaded_version_mismatches_registration(
+    monkeypatch,
+):
+    from training.run_pipeline import run_training_pipeline
+
+    calls = _stub_successful_pipeline_until_serving_verification(monkeypatch)
+
+    def reload_model(registration_result=None):
+        calls.append(("reload", registration_result))
+        return {"status": "model_reloaded", "loaded_model_version": "0"}
+
+    def verify_serving(registration_result, actual_reload_result, training_df):
+        pytest.fail("serving verification must not run after reload version mismatch")
+
+    monkeypatch.setattr(
+        "training.run_pipeline.call_reload_model_endpoint", reload_model
+    )
+    monkeypatch.setattr(
+        "training.run_pipeline.verify_serving_after_reload", verify_serving
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="loaded_model_version='0', registered_model_version='1'",
+    ):
+        run_training_pipeline()
+
+    assert [call[0] for call in calls] == ["reload"]
 
 
 def test_run_training_pipeline_raises_when_serving_verification_fails(
