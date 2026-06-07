@@ -876,15 +876,32 @@ def _run_non_blocking_model_quality_validation(df):
 def _run_non_blocking_evidently_tests(
     df, output_path: str = _DEFAULT_EVIDENTLY_REPORT_PATH
 ) -> dict[str, Any]:
-    """Run Evidently after validation gates without making its status blocking."""
+    """Run Evidently after production registration without making it blocking."""
     try:
         return run_evidently_tests(df, output_path)
     except Exception as exc:
         logger.warning(
-            "Evidently tests failed after validation gates; continuing pipeline: %s",
+            "Evidently tests failed after production registration; "
+            "continuing pipeline: %s",
             _sanitize_for_log(str(exc)),
         )
         return _write_evidently_warning_report(exc, output_path)
+
+
+def _skip_report(status: str, reason: str) -> dict[str, Any]:
+    return {"status": status, "reason": reason}
+
+
+def _should_skip_evidently_tests() -> bool:
+    return _env_flag_is_true("SKIP_EVIDENTLY_TESTS") or _env_flag_is_true(
+        "DISABLE_EVIDENTLY_TESTS"
+    )
+
+
+def _should_skip_model_artifact_save() -> bool:
+    return _env_flag_is_true("SKIP_MODEL_ARTIFACT_SAVE") or _env_flag_is_true(
+        "DISABLE_MODEL_ARTIFACT_SAVE"
+    )
 
 
 def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
@@ -953,39 +970,10 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
         )
         logger.info("model trained")
 
-        model_quality_result = _timed_step(
-            "model-quality validation",
-            _run_non_blocking_model_quality_validation,
-            training_df,
-        )
-        validation_report = _merged_validation_report_dict(
-            schema_result, model_quality_result
-        )
+        # Keep the LMS-critical path to the production MLflow alias minimal:
+        # download -> lightweight schema validation -> train -> register/set alias.
+        validation_report = _validation_report_dict(schema_result)
         _write_validation_report(validation_report, _DEFAULT_VALIDATION_REPORT_PATH)
-
-        if not model_quality_result.is_valid:
-            model_quality_errors = list(getattr(model_quality_result, "errors", []))
-            error_message = (
-                "; ".join(model_quality_errors)
-                or "unknown model quality validation error"
-            )
-            logger.warning(
-                "model quality validation failed after data quality checks passed; "
-                "continuing to train and register new model version: %s",
-                _sanitize_for_log(error_message),
-            )
-
-        evidently_input_df: pd.DataFrame | None = getattr(
-            model_quality_result, "scored_df", None
-        )
-        if evidently_input_df is None:
-            evidently_input_df = training_df
-        evidently_report = _timed_step(
-            "Evidently",
-            _run_non_blocking_evidently_tests,
-            evidently_input_df,
-            _DEFAULT_EVIDENTLY_REPORT_PATH,
-        )
 
         registration_result = _timed_step(
             "MLflow registration",
@@ -1003,12 +991,6 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
         )
         logger.info("model alias verified: %s", _sanitize_for_log(registration_result))
 
-        model_artifact_path = _timed_step(
-            "model artifact saving",
-            save_model_artifact,
-            model,
-            _DEFAULT_MODEL_ARTIFACT_PATH,
-        )
         reload_result = _timed_step(
             "service reload", call_reload_model_endpoint, registration_result
         )
@@ -1036,6 +1018,68 @@ def run_training_pipeline(data_url: str | None = None) -> dict[str, Any]:
             "service loaded model version: %s",
             _sanitize_for_log(serving_verification.get("loaded_model_version")),
         )
+
+        model_artifact_path: str | None = None
+        if _should_skip_model_artifact_save():
+            _timed_step(
+                "model artifact saving",
+                _skip_report,
+                "skipped",
+                "disabled by SKIP_MODEL_ARTIFACT_SAVE/DISABLE_MODEL_ARTIFACT_SAVE",
+            )
+            logger.info("model artifact saving skipped by environment flag")
+        else:
+            model_artifact_path = _timed_step(
+                "model artifact saving",
+                save_model_artifact,
+                model,
+                _DEFAULT_MODEL_ARTIFACT_PATH,
+            )
+
+        model_quality_result = _timed_step(
+            "model-quality validation",
+            _run_non_blocking_model_quality_validation,
+            training_df,
+        )
+        validation_report = _merged_validation_report_dict(
+            schema_result, model_quality_result
+        )
+        _write_validation_report(validation_report, _DEFAULT_VALIDATION_REPORT_PATH)
+
+        if not model_quality_result.is_valid:
+            model_quality_errors = list(getattr(model_quality_result, "errors", []))
+            error_message = (
+                "; ".join(model_quality_errors)
+                or "unknown model quality validation error"
+            )
+            logger.warning(
+                "model quality validation failed after production registration; "
+                "continuing pipeline: %s",
+                _sanitize_for_log(error_message),
+            )
+
+        evidently_input_df: pd.DataFrame | None = getattr(
+            model_quality_result, "scored_df", None
+        )
+        if evidently_input_df is None:
+            evidently_input_df = training_df
+
+        if _should_skip_evidently_tests():
+            evidently_report = _timed_step(
+                "Evidently",
+                _skip_report,
+                "skipped",
+                "disabled by SKIP_EVIDENTLY_TESTS/DISABLE_EVIDENTLY_TESTS",
+            )
+            logger.info("Evidently skipped by environment flag")
+        else:
+            evidently_report = _timed_step(
+                "Evidently",
+                _run_non_blocking_evidently_tests,
+                evidently_input_df,
+                _DEFAULT_EVIDENTLY_REPORT_PATH,
+            )
+
         return {
             "status": pipeline_status,
             "data_path": data_path,

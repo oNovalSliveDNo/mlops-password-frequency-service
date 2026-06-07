@@ -21,6 +21,20 @@ from training.validation_thresholds import DEFAULT_SCHEMA_THRESHOLDS
 
 
 SCHEMA_THRESHOLDS = dict(DEFAULT_SCHEMA_THRESHOLDS)
+EXPECTED_DURATION_LOGS_AFTER_PROD_REGISTRATION = [
+    "data download",
+    "schema validation",
+    "training",
+    "MLflow registration",
+    "alias verification",
+    "service reload",
+    "reload version verification",
+    "serving verification",
+    "model artifact saving",
+    "model-quality validation",
+    "Evidently",
+    "total pipeline",
+]
 
 
 @dataclass(frozen=True)
@@ -704,48 +718,44 @@ def test_run_training_pipeline_continues_to_register_on_failed_model_quality(
     with caplog.at_level(logging.INFO):
         result = run_training_pipeline()
 
-    expected_report = {
+    schema_validation_report = {
         "is_valid": True,
         "errors": [],
         "n_rows": 1,
         "columns": ["Password", "Times"],
         "schema_metrics": schema_metrics,
+        "thresholds": SCHEMA_THRESHOLDS,
+    }
+
+    merged_validation_report = {
+        **schema_validation_report,
         "model_quality_is_valid": False,
         "model_quality_errors": ["rmse too high for token abc123"],
         "model_quality_metrics": model_quality_metrics,
-        "thresholds": SCHEMA_THRESHOLDS,
     }
+
     assert result["status"] == "success"
-    assert result["validation_report"] == expected_report
+    assert result["validation_report"] == merged_validation_report
     assert result["registration"]["model_version"] == "9"
+
     written_report = json.loads(validation_report_path.read_text(encoding="utf-8"))
-    assert written_report == expected_report
+    assert written_report == merged_validation_report
+
     assert calls[0][0] == "train"
-    assert calls[1][0] == "evidently"
-    assert calls[2] == ("register", "model", {"n_rows": 1}, expected_report, "prod")
-    assert calls[3] == ("save", "model", "artifacts/model.joblib")
+    assert calls[1] == (
+        "register",
+        "model",
+        {"n_rows": 1},
+        schema_validation_report,
+        "prod",
+    )
+    assert calls[2] == ("save", "model", "artifacts/model.joblib")
+    assert calls[3][0] == "evidently"
     assert (
-        "model quality validation failed after data quality checks passed; "
-        "continuing to train and register new model version: rmse too high for token abc123"
-        in caplog.text
+        "model quality validation failed after production registration; "
+        "continuing pipeline: rmse too high for token abc123" in caplog.text
     )
-    _assert_duration_logs(
-        caplog,
-        [
-            "data download",
-            "schema validation",
-            "training",
-            "model-quality validation",
-            "Evidently",
-            "MLflow registration",
-            "alias verification",
-            "model artifact saving",
-            "service reload",
-            "reload version verification",
-            "serving verification",
-            "total pipeline",
-        ],
-    )
+    _assert_duration_logs(caplog, EXPECTED_DURATION_LOGS_AFTER_PROD_REGISTRATION)
 
 
 def test_main_allows_validation_failed_result(monkeypatch):
@@ -1218,32 +1228,34 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
 
     assert [call[0] for call in calls] == [
         "train",
-        "model_quality",
-        "evidently",
         "register",
         "verify_alias",
-        "save",
         "reload",
         "verify_serving",
+        "save",
+        "model_quality",
+        "evidently",
     ]
     assert list(calls[0][1].columns) == ["Password", "Times"]
     assert calls[0][1].equals(training_df[["Password", "Times"]])
-    assert calls[1][0] == "model_quality"
-    assert calls[1][1] is training_df
-    assert calls[2][0] == "evidently"
-    assert calls[2][1] is scored_df
-    assert calls[2][2] == "reports/tests.json"
-    assert calls[3] == (
+    schema_validation_report = {
+        "is_valid": True,
+        "errors": [],
+        "n_rows": 2,
+        "columns": ["Password", "Times"],
+        "schema_metrics": schema_metrics,
+        "thresholds": SCHEMA_THRESHOLDS,
+    }
+    assert calls[1] == (
         "register",
         "model",
         {"n_rows": 2},
-        merged_validation_report,
+        schema_validation_report,
         "prod",
     )
-    assert calls[4] == ("verify_alias", registration_result)
-    assert calls[5] == ("save", "model", "artifacts/model.joblib")
-    assert calls[6] == ("reload", registration_result)
-    assert calls[7] == (
+    assert calls[2] == ("verify_alias", registration_result)
+    assert calls[3] == ("reload", registration_result)
+    assert calls[4] == (
         "verify_serving",
         registration_result,
         {
@@ -1253,6 +1265,12 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
         },
         training_df,
     )
+    assert calls[5] == ("save", "model", "artifacts/model.joblib")
+    assert calls[6][0] == "model_quality"
+    assert calls[6][1] is training_df
+    assert calls[7][0] == "evidently"
+    assert calls[7][1] is scored_df
+    assert calls[7][2] == "reports/tests.json"
     assert result["validation_report"] == merged_validation_report
     assert result["reload"] == {
         "status": "model_reloaded",
@@ -1275,23 +1293,7 @@ def test_run_training_pipeline_reloads_after_prod_registration(monkeypatch, capl
         in caplog.text
     )
     assert "super-secret" not in caplog.text
-    _assert_duration_logs(
-        caplog,
-        [
-            "data download",
-            "schema validation",
-            "training",
-            "model-quality validation",
-            "Evidently",
-            "MLflow registration",
-            "alias verification",
-            "model artifact saving",
-            "service reload",
-            "reload version verification",
-            "serving verification",
-            "total pipeline",
-        ],
-    )
+    _assert_duration_logs(caplog, EXPECTED_DURATION_LOGS_AFTER_PROD_REGISTRATION)
 
 
 def test_two_valid_datasets_create_versions_and_move_prod_alias(monkeypatch):
@@ -1397,7 +1399,7 @@ def test_two_valid_datasets_create_versions_and_move_prod_alias(monkeypatch):
     ]
     assert all(
         registration["validation_report"]["is_valid"] is True
-        and registration["validation_report"]["model_quality_is_valid"] is False
+        and "model_quality_is_valid" not in registration["validation_report"]
         for registration in registered_versions
     )
 
